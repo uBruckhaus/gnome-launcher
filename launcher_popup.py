@@ -32,12 +32,37 @@ if _preloads:
 else:
     os.environ.pop("LD_PRELOAD", None)
 
+import atexit
 from launcher_core import (
     app_process_name, background_process_names, client_matches_app,
     launch_action, launch_app, load_hidden_apps, parse_desktop_files,
     save_hidden_apps,
 )
 from palette import ThemePalette
+
+
+def get_pid_file():
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and os.path.isdir(runtime_dir):
+        return Path(runtime_dir) / "simple-launcher-for-fools.pid"
+    return Path("/tmp") / f"simple-launcher-for-fools-{os.getuid()}.pid"
+
+
+def cleanup_pid():
+    try:
+        pid_file = get_pid_file()
+        if pid_file.exists():
+            content = pid_file.read_text().strip()
+            if content == str(os.getpid()):
+                pid_file.unlink(missing_ok=True)
+        legacy = Path("/tmp/simple-launcher-for-fools.pid")
+        if legacy.exists() and legacy.read_text().strip() == str(os.getpid()):
+            legacy.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+atexit.register(cleanup_pid)
 
 
 class Launcher(Gtk.Application):
@@ -52,15 +77,21 @@ class Launcher(Gtk.Application):
         self.theme = ThemePalette()
         self.search_query = ""
 
+    def do_shutdown(self):
+        cleanup_pid()
+        super().do_shutdown()
+
     def do_activate(self):
         if self.window is None:
             self.build_window()
             self.hold()  # Keep the singleton alive while its popup is hidden.
             signal.signal(signal.SIGUSR1, lambda *_: GLib.idle_add(self.toggle))
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                signal.signal(sig, lambda *_: sys.exit(0))
             GLib.timeout_add(100, lambda: True)  # Let Python dispatch SIGUSR1.
             GLib.timeout_add_seconds(1, self.poll)
             try:
-                Path("/tmp/simple-launcher-for-fools.pid").write_text(str(os.getpid()))
+                get_pid_file().write_text(str(os.getpid()))
             except Exception:
                 pass
         self.open()

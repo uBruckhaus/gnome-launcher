@@ -3,32 +3,61 @@
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
-PID_FILE="/tmp/simple-launcher-for-fools.pid"
 
-is_running() {
+# Use user-isolated runtime directory instead of world-writable /tmp
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" ]]; then
+    PID_FILE="${XDG_RUNTIME_DIR}/simple-launcher-for-fools.pid"
+else
+    PID_FILE="/tmp/simple-launcher-for-fools-${UID:-$(id -u)}.pid"
+fi
+
+# Clean legacy un-scoped /tmp file if present
+if [[ -f "/tmp/simple-launcher-for-fools.pid" ]]; then
+    rm -f "/tmp/simple-launcher-for-fools.pid" 2>/dev/null || true
+fi
+
+# Verify if a given PID is alive AND actually belongs to launcher_popup.py
+# This prevents sending SIGUSR1 to unrelated processes if a stale PID was reused
+is_launcher_process() {
     local pid="$1"
-    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+    [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
+    # Check if process exists and is accessible by current user
+    kill -0 "$pid" 2>/dev/null || return 1
+
+    # Check cmdline to ensure it is actually launcher_popup.py
+    if [[ -r "/proc/$pid/cmdline" ]]; then
+        local cmdline
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
+        if [[ "$cmdline" == *"launcher_popup.py"* ]]; then
+            return 0
+        fi
+    fi
+
+    return 1
 }
 
+# Check recorded PID
 if [[ -f "$PID_FILE" ]]; then
     PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if is_running "$PID"; then
+    if is_launcher_process "$PID"; then
         kill -USR1 "$PID" 2>/dev/null || true
         exit 0
     else
-        rm -f "$PID_FILE"
+        # Stale PID file or PID was reused by another program; remove safely
+        rm -f "$PID_FILE" 2>/dev/null || true
     fi
 fi
 
-# Fallback: check if process is running by name
-PIDS="$(pgrep -f "${DIR}/launcher_popup.py" || true)"
-if [[ -n "$PIDS" ]]; then
-    for p in $PIDS; do
+# Fallback: scan for any existing launcher instance and verify before signaling
+while IFS= read -r p; do
+    [[ -n "$p" ]] || continue
+    if is_launcher_process "$p"; then
         kill -USR1 "$p" 2>/dev/null || true
-    done
-    exit 0
-fi
+        echo "$p" > "$PID_FILE"
+        exit 0
+    fi
+done < <(pgrep -f "${DIR}/launcher_popup.py" 2>/dev/null || true)
 
-# Start launcher popup in background
+# Not running: start launcher popup in background
 /usr/bin/python3 "${DIR}/launcher_popup.py" >/dev/null 2>&1 &
 echo "$!" > "$PID_FILE"
