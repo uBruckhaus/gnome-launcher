@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "ubruckhaus.simple-launcher-for-fools",
+  "name": "Simple Launcher for Fools",
+  "version": "1.0.0",
+  "author": "Uwe Bruckhaus",
+  "license": "MIT",
+  "description": "Fast, theme-aware application launcher popup and bar widget for Omarchy.",
+  "homepage": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
+  "repository": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
+  "keywords": [
+    "launcher",
+    "menu",
+    "apps",
+    "gtk4",
+    "layer-shell",
+    "omarchy"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "keepLoaded": false,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Simple Launcher",
+    "description": "Toggle Simple Launcher for Fools",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
