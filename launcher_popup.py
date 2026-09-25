@@ -48,15 +48,46 @@ def get_pid_file():
     return Path("/tmp") / f"simple-launcher-for-fools-{os.getuid()}.pid"
 
 
+def get_process_starttime(pid=None):
+    if pid is None:
+        pid = os.getpid()
+    try:
+        with open(f"/proc/{pid}/stat", "r") as f:
+            content = f.read()
+        after_comm = content[content.rfind(")") + 2:]
+        fields = after_comm.split()
+        return fields[19]
+    except Exception:
+        return ""
+
+
+def write_pid_file():
+    try:
+        pid = os.getpid()
+        st = get_process_starttime(pid)
+        exe = str(Path(sys.executable).resolve())
+        script = str(Path(__file__).resolve())
+        get_pid_file().write_text(f"{pid}:{st}:{exe}:{script}\n")
+    except Exception:
+        pass
+
+
 def cleanup_pid():
     try:
+        pid = os.getpid()
+        current_st = get_process_starttime(pid)
         pid_file = get_pid_file()
         if pid_file.exists():
             content = pid_file.read_text().strip()
-            if content == str(os.getpid()):
+            parts = content.split(":")
+            stored_pid = parts[0]
+            if stored_pid == str(pid):
+                if len(parts) >= 2 and parts[1]:
+                    if current_st and parts[1] != current_st:
+                        return
                 pid_file.unlink(missing_ok=True)
         legacy = Path("/tmp/simple-launcher-for-fools.pid")
-        if legacy.exists() and legacy.read_text().strip() == str(os.getpid()):
+        if legacy.exists() and legacy.read_text().strip().split(":")[0] == str(pid):
             legacy.unlink(missing_ok=True)
     except Exception:
         pass
@@ -90,10 +121,7 @@ class Launcher(Gtk.Application):
                 signal.signal(sig, lambda *_: sys.exit(0))
             GLib.timeout_add(100, lambda: True)  # Let Python dispatch SIGUSR1.
             GLib.timeout_add_seconds(1, self.poll)
-            try:
-                get_pid_file().write_text(str(os.getpid()))
-            except Exception:
-                pass
+            write_pid_file()
         self.open()
 
     def build_window(self):
@@ -592,9 +620,19 @@ class Launcher(Gtk.Application):
     def ensure_selected_visible(self, row):
         if row.get_parent() == self.rows and self.rows.get_selected_row() == row:
             row.grab_focus()
-            bounds = row.get_allocation()
-            self.scroller.get_vadjustment().clamp_page(
-                bounds.y, bounds.y + bounds.height)
+            try:
+                ok, bounds = row.compute_bounds(self.rows)
+                if ok:
+                    self.scroller.get_vadjustment().clamp_page(
+                        bounds.get_y(), bounds.get_y() + bounds.get_height())
+                else:
+                    alloc = row.get_allocation()
+                    self.scroller.get_vadjustment().clamp_page(
+                        alloc.y, alloc.y + alloc.height)
+            except Exception:
+                alloc = row.get_allocation()
+                self.scroller.get_vadjustment().clamp_page(
+                    alloc.y, alloc.y + alloc.height)
         return GLib.SOURCE_REMOVE
 
     def activate_selected(self, *_args):

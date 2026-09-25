@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Simple Launcher for Fools - Toggle script
-set -e
+set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+
+# Resolve canonical interpreter and script path
+PYTHON_BIN="/usr/bin/python3"
+[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3)"
+CANONICAL_PYTHON="$(readlink -f "$PYTHON_BIN" 2>/dev/null || true)"
+CANONICAL_SCRIPT="$(readlink -f "${DIR}/launcher_popup.py" 2>/dev/null || true)"
 
 # Use user-isolated runtime directory instead of world-writable /tmp
 if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" ]]; then
@@ -16,31 +22,87 @@ if [[ -f "/tmp/simple-launcher-for-fools.pid" ]]; then
     rm -f "/tmp/simple-launcher-for-fools.pid" 2>/dev/null || true
 fi
 
-# Verify if a given PID is alive AND actually belongs to launcher_popup.py
-# This prevents sending SIGUSR1 to unrelated processes if a stale PID was reused
+# Extract process start time (kernel clock ticks since boot, field 22 in /proc/$pid/stat)
+# Uniquely distinguishes recycled PIDs across process lifetimes.
+get_proc_starttime() {
+    local pid="$1"
+    local stat_content after_comm
+    stat_content="$(cat "/proc/$pid/stat" 2>/dev/null || true)"
+    after_comm="${stat_content##*)}"
+    if [[ -n "$after_comm" ]]; then
+        local -a fields
+        read -r -a fields <<< "$after_comm"
+        # In /proc/$pid/stat, field 1 is pid, field 2 is comm.
+        # After ')', field 3 (state) is index 0. Field 22 (starttime) is index 19.
+        echo "${fields[19]:-}"
+    fi
+}
+
+# Verify process identity strictly before signaling:
+# 1. PID is numeric and responds to kill -0
+# 2. Process UID matches current user
+# 3. Kernel start time matches recorded start time (prevents PID reuse race)
+# 4. Canonical /proc/$pid/exe strictly matches Python interpreter
+# 5. Canonical script argument from /proc/$pid/cmdline strictly matches launcher_popup.py
 is_launcher_process() {
     local pid="$1"
+    local expected_starttime="${2:-}"
+    local expected_exe="${3:-$CANONICAL_PYTHON}"
+    local expected_script="${4:-$CANONICAL_SCRIPT}"
+
     [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
-    # Check if process exists and is accessible by current user
     kill -0 "$pid" 2>/dev/null || return 1
 
-    # Check cmdline to ensure it is actually launcher_popup.py
-    if [[ -r "/proc/$pid/cmdline" ]]; then
-        local cmdline
-        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-        if [[ "$cmdline" == *"launcher_popup.py"* ]]; then
-            return 0
-        fi
+    # 1. UID ownership check
+    local proc_uid
+    proc_uid="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
+    [[ "$proc_uid" == "${UID:-$(id -u)}" ]] || return 1
+
+    # 2. Process start time / identity check
+    local current_starttime
+    current_starttime="$(get_proc_starttime "$pid")"
+    [[ -n "$current_starttime" ]] || return 1
+    if [[ -n "$expected_starttime" && "$current_starttime" != "$expected_starttime" ]]; then
+        return 1
     fi
 
-    return 1
+    # 3. Executable verification (exact canonical Python interpreter)
+    local target_exe
+    target_exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+    [[ -n "$target_exe" && ( "$target_exe" == "$expected_exe" || "$target_exe" == "$CANONICAL_PYTHON" ) ]] || return 1
+
+    # 4. Cmdline verification (exact canonical script path)
+    [[ -r "/proc/$pid/cmdline" ]] || return 1
+    local -a args
+    mapfile -d "" args < "/proc/$pid/cmdline" 2>/dev/null || return 1
+
+    local script_arg=""
+    local i
+    for ((i = 1; i < ${#args[@]}; i++)); do
+        local arg="${args[$i]}"
+        if [[ "$arg" == "--" ]]; then
+            script_arg="${args[$((i + 1))]:-}"
+            break
+        elif [[ "$arg" != -* ]]; then
+            script_arg="$arg"
+            break
+        fi
+    done
+
+    [[ -n "$script_arg" ]] || return 1
+    local target_script
+    target_script="$(readlink -f "$script_arg" 2>/dev/null || true)"
+    [[ -n "$target_script" && "$target_script" == "$expected_script" ]] || return 1
+
+    return 0
 }
 
 # Check recorded PID
 if [[ -f "$PID_FILE" ]]; then
-    PID="$(cat "$PID_FILE" 2>/dev/null || true)"
-    if is_launcher_process "$PID"; then
-        kill -USR1 "$PID" 2>/dev/null || true
+    local_data="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
+    IFS=":" read -r rec_pid rec_st rec_exe rec_script <<< "$local_data"
+    if is_launcher_process "$rec_pid" "$rec_st" "$rec_exe" "$rec_script"; then
+        kill -USR1 "$rec_pid" 2>/dev/null || true
         exit 0
     else
         # Stale PID file or PID was reused by another program; remove safely
@@ -48,16 +110,20 @@ if [[ -f "$PID_FILE" ]]; then
     fi
 fi
 
-# Fallback: scan for any existing launcher instance and verify before signaling
+# Fallback: scan for any running instance matching exact script and current user
 while IFS= read -r p; do
     [[ -n "$p" ]] || continue
-    if is_launcher_process "$p"; then
+    if [[ "$p" == "$$" ]]; then continue; fi
+    if is_launcher_process "$p" "" "$CANONICAL_PYTHON" "$CANONICAL_SCRIPT"; then
         kill -USR1 "$p" 2>/dev/null || true
-        echo "$p" > "$PID_FILE"
+        st="$(get_proc_starttime "$p")"
+        echo "${p}:${st}:${CANONICAL_PYTHON}:${CANONICAL_SCRIPT}" > "$PID_FILE"
         exit 0
     fi
-done < <(pgrep -f "${DIR}/launcher_popup.py" 2>/dev/null || true)
+done < <(pgrep -u "${UID:-$(id -u)}" -f "${CANONICAL_SCRIPT}" 2>/dev/null || true)
 
 # Not running: start launcher popup in background
-/usr/bin/python3 "${DIR}/launcher_popup.py" >/dev/null 2>&1 &
-echo "$!" > "$PID_FILE"
+"$PYTHON_BIN" "${CANONICAL_SCRIPT}" >/dev/null 2>&1 &
+CHILD_PID=$!
+CHILD_ST="$(get_proc_starttime "$CHILD_PID")"
+echo "${CHILD_PID}:${CHILD_ST}:${CANONICAL_PYTHON}:${CANONICAL_SCRIPT}" > "$PID_FILE"
