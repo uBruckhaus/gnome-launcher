@@ -160,14 +160,9 @@ def scan_standalone_appimages(seen_names):
 
     for directory in get_appimage_directories():
         for path in directory.glob("*.[aA][pP][pP][iI][mM][aA][gG][eE]"):
-            if not path.is_file():
+            # Discovery must respect user permissions, never make files executable.
+            if not path.is_file() or not os.access(path, os.X_OK):
                 continue
-            try:
-                st = path.stat()
-                if not (st.st_mode & 0o111):
-                    os.chmod(path, st.st_mode | 0o755)
-            except OSError:
-                pass
 
             app_name = ""
             app_desc = ""
@@ -517,4 +512,3 @@ def launch_action(app, action_id):
         except Exception:
             pass
     return False
-
