@@ -218,7 +218,8 @@ def scan_standalone_appimages(seen_names):
             seen_names.add(name_key)
             apps.append({
                 "name": app_name,
-                "exec": f'"{path}"',
+                "exec": shlex.join([str(path)]),
+                "argv": [str(path)],
                 "icon": icon_path or "application-x-executable",
                 "desktop_path": "",
                 "actions": [],
@@ -430,6 +431,21 @@ def _clean_env():
 
 
 def launch_app(app):
+    # Standalone AppImages are executable paths, never shell programs. A failed
+    # direct launch must not fall through to the desktop-entry shell fallback.
+    if "argv" in app:
+        try:
+            subprocess.Popen(
+                app["argv"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=_clean_env(),
+            )
+            return True
+        except OSError:
+            return False
+
     desktop_path = app.get("desktop_path", "")
     desktop_file = Path(desktop_path).name if desktop_path else ""
 
