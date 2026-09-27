@@ -1,4 +1,6 @@
 import os
+import hashlib
+import tempfile
 import json
 import re
 import selectors
@@ -155,7 +157,7 @@ def get_appimage_directories():
     return [d for d in candidates if d.is_dir()]
 
 
-def read_bounded_output(command, max_bytes=64 * 1024, timeout=1):
+def read_bounded_output(command, max_bytes=64 * 1024, timeout=1, binary=False):
     """Read optional archive metadata with a byte limit and a total deadline."""
     deadline = time.monotonic() + timeout
     with subprocess.Popen(command, stdout=subprocess.PIPE,
@@ -178,7 +180,7 @@ def read_bounded_output(command, max_bytes=64 * 1024, timeout=1):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or process.wait(timeout=remaining) != 0:
                 return None
-            return output.decode("utf-8", errors="replace")
+            return bytes(output) if binary else output.decode("utf-8", errors="replace")
         except subprocess.TimeoutExpired:
             return None
         finally:
@@ -186,6 +188,40 @@ def read_bounded_output(command, max_bytes=64 * 1024, timeout=1):
             if process.poll() is None:
                 process.kill()
             process.wait()
+
+
+MAX_APPIMAGE_ICON_BYTES = 1024 * 1024
+
+
+def cache_appimage_icon(path, raw_icon, cache_dir):
+    """Extract to a bounded pipe, never let the archive tool write files."""
+    icon_name = Path(raw_icon).name
+    if not icon_name or icon_name in {".", ".."}:
+        return ""
+    # Archive contents never determine a destination path. One cache slot per
+    # AppImage also prevents repeated scans accumulating extracted files.
+    key = hashlib.sha256(os.fsencode(str(path.resolve()))).hexdigest()
+    target = cache_dir / (key + ".icon")
+    members = [icon_name] if icon_name.endswith((".png", ".svg")) else [icon_name + ".png", icon_name + ".svg"]
+    for member in members:
+        data = read_bounded_output(
+            ["7z", "e", "-so", "-spd", str(path), member],
+            max_bytes=MAX_APPIMAGE_ICON_BYTES, timeout=2, binary=True)
+        if not data:
+            continue
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=cache_dir, delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(data)
+            # Atomic replacement avoids following an existing cache symlink.
+            os.replace(temporary, target)
+            return str(target)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    return ""
 
 
 def scan_standalone_appimages(seen_names):
@@ -203,6 +239,7 @@ def scan_standalone_appimages(seen_names):
             app_desc = ""
             icon_path = ""
             startup_class = ""
+            raw_icon = ""
 
             if has_7z:
                 try:
@@ -216,22 +253,10 @@ def scan_standalone_appimages(seen_names):
                                 app_desc = line.split("=", 1)[1].strip()
                             elif line.startswith("StartupWMClass="):
                                 startup_class = line.split("=", 1)[1].strip()
-                            elif line.startswith("Icon="):
+                            elif line.startswith("Icon=") and not raw_icon:
                                 raw_icon = line.split("=", 1)[1].strip()
-                                icon_cache_dir.mkdir(parents=True, exist_ok=True)
-                                target_icon = icon_cache_dir / f"{path.stem}_{Path(raw_icon).name}.png"
-                                if target_icon.exists():
-                                    icon_path = str(target_icon)
-                                else:
-                                    subprocess.run(
-                                        ["7z", "e", "-y", f"-o{icon_cache_dir}", str(path),
-                                         f"*{raw_icon}*.png", f"*{raw_icon}*.svg"],
-                                        stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, timeout=2
-                                    )
-                                    found = list(icon_cache_dir.glob(f"*{raw_icon}*"))
-                                    if found:
-                                        icon_path = str(found[0])
+                        if raw_icon:
+                            icon_path = cache_appimage_icon(path, raw_icon, icon_cache_dir)
                 except Exception:
                     pass
 
