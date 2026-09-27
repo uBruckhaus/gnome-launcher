@@ -17,6 +17,8 @@ Fast, theme-aware application launcher popup and native bar widget for [Omarchy]
 
 Standalone AppImage metadata is limited to 64 KiB. Icons are extracted through a bounded pipe with a 1 MiB limit before being saved atomically in the cache. Oversized, timed-out, or failed icon extractions use the generic application icon. The archive extractor never writes icons directly to disk.
 
+Desktop entries launch through `uwsm-app` or Gio using the original desktop file. If native launching fails, the launcher reports failure; it never executes the entry’s `Exec` text through a shell.
+
 ## Installation
 
 Install using the Omarchy plugin manager:

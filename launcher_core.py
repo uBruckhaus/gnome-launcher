@@ -491,7 +491,7 @@ def _clean_env():
 
 def launch_app(app):
     # Standalone AppImages are executable paths, never shell programs. A failed
-    # direct launch must not fall through to the desktop-entry shell fallback.
+    # direct launch must not fall through to another launch method.
     if "argv" in app:
         try:
             subprocess.Popen(
@@ -506,7 +506,6 @@ def launch_app(app):
             return False
 
     desktop_path = app.get("desktop_path", "")
-    desktop_file = Path(desktop_path).name if desktop_path else ""
 
     # 1. Primary: uwsm-app (places app in app-graphical.slice and natively resolves desktop files)
     if desktop_path and shutil.which("uwsm-app"):
@@ -522,43 +521,17 @@ def launch_app(app):
         except OSError:
             pass
 
-    if desktop_file and shutil.which("uwsm-app"):
-        try:
-            subprocess.Popen(
-                ["uwsm-app", "--", desktop_file],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=_clean_env(),
-            )
-            return True
-        except OSError:
-            pass
-
-    # 3. Tertiary: GioUnix.DesktopAppInfo
+    # Native fallback uses the same file and desktop-entry argument semantics.
     if desktop_path:
         try:
             info = GioUnix.DesktopAppInfo.new_from_filename(desktop_path)
             if info:
-                info.launch_uris([], None)
-                return True
+                return bool(info.launch_uris([], None))
         except Exception:
             pass
 
-    # 4. Fallback: raw shell execution
-    command = app.get("exec", "")
-    if command:
-        try:
-            subprocess.Popen(
-                ["sh", "-c", command],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-                env=_clean_env(),
-            )
-            return True
-        except OSError:
-            pass
+    # Exec is display/matching metadata, never a shell command. A native
+    # rejection must remain a failure instead of gaining shell semantics.
 
     return False
 
