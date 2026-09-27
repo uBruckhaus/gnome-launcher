@@ -1,11 +1,13 @@
 import os
 import json
 import re
+import selectors
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import time
 import urllib.parse
 from pathlib import Path
 import gi
@@ -153,6 +155,39 @@ def get_appimage_directories():
     return [d for d in candidates if d.is_dir()]
 
 
+def read_bounded_output(command, max_bytes=64 * 1024, timeout=1):
+    """Read optional archive metadata with a byte limit and a total deadline."""
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(command, stdout=subprocess.PIPE,
+                          stderr=subprocess.DEVNULL) as process:
+        try:
+            output = bytearray()
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or not selector.select(remaining):
+                        return None
+                    chunk = os.read(process.stdout.fileno(),
+                                    min(8192, max_bytes + 1 - len(output)))
+                    if not chunk:
+                        break
+                    output.extend(chunk)
+                    if len(output) > max_bytes:
+                        return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+                return None
+            return output.decode("utf-8", errors="replace")
+        except subprocess.TimeoutExpired:
+            return None
+        finally:
+            # Reap extractors even when they flood output or close stdout and hang.
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
 def scan_standalone_appimages(seen_names):
     apps = []
     icon_cache_dir = Path.home() / ".cache/applauncher/icons"
@@ -171,12 +206,10 @@ def scan_standalone_appimages(seen_names):
 
             if has_7z:
                 try:
-                    res = subprocess.run(
-                        ["7z", "e", "-so", str(path), "*.desktop"],
-                        capture_output=True, text=True, timeout=1
-                    )
-                    if res.returncode == 0 and "[Desktop Entry]" in res.stdout:
-                        for line in res.stdout.splitlines():
+                    desktop_text = read_bounded_output(
+                        ["7z", "e", "-so", str(path), "*.desktop"])
+                    if desktop_text and "[Desktop Entry]" in desktop_text:
+                        for line in desktop_text.splitlines():
                             if line.startswith("Name=") and not app_name:
                                 app_name = line.split("=", 1)[1].strip()
                             elif line.startswith("Comment=") and not app_desc:
@@ -193,7 +226,8 @@ def scan_standalone_appimages(seen_names):
                                     subprocess.run(
                                         ["7z", "e", "-y", f"-o{icon_cache_dir}", str(path),
                                          f"*{raw_icon}*.png", f"*{raw_icon}*.svg"],
-                                        capture_output=True, timeout=2
+                                        stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, timeout=2
                                     )
                                     found = list(icon_cache_dir.glob(f"*{raw_icon}*"))
                                     if found:
