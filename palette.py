@@ -1,4 +1,4 @@
-"""Simple Launcher for Fools - Theme colors from Omarchy."""
+"""Simple Launcher - Theme colors from Omarchy."""
 
 from pathlib import Path
 import tomllib

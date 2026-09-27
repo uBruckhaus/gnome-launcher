@@ -1,8 +1,8 @@
-# Simple Launcher for Fools
+# Simple Launcher
 
 Fast, theme-aware application launcher popup and native bar widget for [Omarchy](https://omarchy.org).
 
-![Simple Launcher for Fools](preview.png)
+![Simple Launcher](preview.png)
 
 ## Features
 
@@ -33,7 +33,7 @@ Or install locally:
 
 ## Keybindings (Optional)
 
-To bind Simple Launcher for Fools to a global shortcut (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
+To bind Simple Launcher to a global shortcut (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER, SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")

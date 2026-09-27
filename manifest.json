@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
-  "name": "Simple Launcher for Fools",
+  "name": "Simple Launcher",
   "version": "1.0.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
@@ -25,7 +25,7 @@
   },
   "barWidget": {
     "displayName": "Simple Launcher",
-    "description": "Toggle Simple Launcher for Fools",
+    "description": "Toggle Simple Launcher",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left"

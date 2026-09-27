@@ -127,7 +127,7 @@ class Launcher(Gtk.Application):
     def build_window(self):
         window = Gtk.ApplicationWindow(application=self)
         window.set_decorated(False)
-        window.set_title("Simple Launcher for Fools")
+        window.set_title("Simple Launcher")
         window.set_name("launcher-window")
         Gtk4LayerShell.init_for_window(window)
         Gtk4LayerShell.set_namespace(window, "simple-launcher-for-fools")

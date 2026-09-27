@@ -1,13 +1,13 @@
-# Marketplace Publication Listing: Simple Launcher for Fools
+# Marketplace Publication Listing: Simple Launcher
 
-This document contains the ready-to-use copy, metadata, and feature breakdown for submitting **Simple Launcher for Fools** to the [Omarchy Plugin Marketplace](https://plugins.omarchy.org) and `omacom/omarchy-plugin-marketplace`.
+This document contains the ready-to-use copy, metadata, and feature breakdown for submitting **Simple Launcher** to the [Omarchy Plugin Marketplace](https://plugins.omarchy.org) and `omacom/omarchy-plugin-marketplace`.
 
 ---
 
 ## 📋 Marketplace Metadata Sheet
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
-- **Display Name**: `Simple Launcher for Fools`
+- **Display Name**: `Simple Launcher`
 - **Version**: `1.0.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Compositor` *(Alternative: `Utilities`)*
@@ -26,7 +26,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 📝 Full Marketplace Description
 
-**Simple Launcher for Fools** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
+**Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
 
