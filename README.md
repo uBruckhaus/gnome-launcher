@@ -1,6 +1,6 @@
 # Simple Launcher
 
-Fast, theme-aware application launcher popup and native bar widget for [Omarchy](https://omarchy.org).
+Fast, theme-aware application launcher popup and bar widget for [Omarchy](https://omarchy.org), with per-app global shortcuts and conflict-aware key suggestions.
 
 ![Simple Launcher](preview.png)
 

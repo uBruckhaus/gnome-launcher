@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.1.2`
+- **Version**: `1.1.3`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Compositor` *(Alternative: `Utilities`)*
 - **Tags**: `launcher`, `bar-widget`, `gtk4`, `wayland`, `apps`, `shortcuts`, `keybindings`
