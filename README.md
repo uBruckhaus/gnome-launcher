@@ -13,6 +13,7 @@ Fast, theme-aware application launcher popup and native bar widget for [Omarchy]
 - **Running App Tracking**: Inspects Hyprland client states and running processes in real-time, displaying status indicator dots next to active apps.
 - **PWA & AppImage Support**: Automatically scans `.desktop` files, Chromium/Chrome Progressive Web Apps (PWAs), and standalone AppImage executables.
 - **Hidden Apps Management**: Conceal distracting helper tools or background daemons from the launcher view with one click, or toggle visibility with the top-right eye icon.
+- **App Shortcuts**: Bind a global Hyprland shortcut to any app from its actions menu (`Shortcut…` or `Ctrl+K`). Conflicts are graded: free combos are suggested, your own bindings show a warning before being replaced, and Omarchy defaults need an explicit second confirmation.
 - **Lightweight & Self-Contained**: Powered by standard system Python and GIO/GTK4. No heavy background virtual environments needed.
 
 Standalone AppImage metadata is limited to 64 KiB. Icons are extracted through a bounded pipe with a 1 MiB limit before being saved atomically in the cache. Oversized, timed-out, or failed icon extractions use the generic application icon. The archive extractor never writes icons directly to disk.
@@ -49,6 +50,18 @@ Or for `SUPER + CTRL + ALT + SPACE`:
 o.bind("SUPER + CTRL + ALT + SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
 
+## App Shortcuts
+
+Open an app's actions menu and choose **Shortcut…** (or press `Ctrl+K`). The top of the page lists the app's shortcuts, with a tag showing where each comes from (`Launcher` or your config file). **×** removes a launcher shortcut, or turns off a shortcut from your config; turned-off ones stay listed with **Turn on**. Below, under **Add a shortcut**, toggle modifiers and press a key, or click one of the free keys listed for the selected modifiers. Free keys are listed alphabetically. Apps with a shortcut start with its modifiers; others start with your default (Super + Shift), which the **Default for apps without a shortcut** checkbox changes (saved in `~/.config/applauncher/settings.json`). **Assign** stays disabled until you choose a key.
+
+| Status | Meaning | Action |
+| --- | --- | --- |
+| Free (green) | Nothing uses the combo | **Assign** |
+| Yours (yellow) | Your own binding or another launcher shortcut uses it | **Replace** / **Move here** |
+| Omarchy (red) | An Omarchy default uses it | **Override…**, then **Confirm override** |
+
+Shortcuts are stored in `~/.config/applauncher/shortcuts.json` and written to `~/.config/hypr/simple-launcher-shortcuts.lua`, which is required once at the end of `~/.config/hypr/hyprland.lua` (a backup is kept as `hyprland.lua.before-simple-launcher-shortcuts`). Your other config files are never edited: replacing or unbinding a binding is an `hl.unbind` in the generated file, so removing the shortcut restores the original. Every change is validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
 ## Keyboard Navigation
 
 | Key | Action |
@@ -62,6 +75,7 @@ o.bind("SUPER + CTRL + ALT + SPACE", "Simple Launcher", "~/.config/omarchy/plugi
 | `Escape` | Clear search query, or close launcher if search is empty |
 | `Right Arrow` | Open context actions menu (for apps with desktop actions) |
 | `Delete` | Close active instance of the selected app |
+| `Ctrl+K` | Manage the global shortcut of the selected app |
 | `Click outside` | Dismiss launcher popup |
 
 ## Removal

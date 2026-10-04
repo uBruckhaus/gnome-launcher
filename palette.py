@@ -10,6 +10,9 @@ DEFAULT_COLORS = {
     "selection": "#45475a",
     "muted": "#888894",
     "red": "#f04452",
+    "yellow": "#f9e2af",
+    "orange": "#fab387",
+    "green": "#a6e3a1",
 }
 
 

@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "Simple Launcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Fast, theme-aware application launcher popup and bar widget for Omarchy.",
+  "description": "Fast, theme-aware application launcher popup and bar widget for Omarchy, with per-app global shortcuts and conflict-aware key suggestions.",
   "homepage": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "repository": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "keywords": [
@@ -14,6 +14,8 @@
     "apps",
     "gtk4",
     "layer-shell",
+    "shortcuts",
+    "keybindings",
     "omarchy"
   ],
   "kinds": [

@@ -8,10 +8,10 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.0.0`
+- **Version**: `1.1.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Compositor` *(Alternative: `Utilities`)*
-- **Tags**: `launcher`, `bar-widget`, `gtk4`, `wayland`, `apps`
+- **Tags**: `launcher`, `bar-widget`, `gtk4`, `wayland`, `apps`, `shortcuts`, `keybindings`
 - **Repository**: `https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools`
 - **License**: `MIT`
 - **Default Bar Section**: `left`
@@ -20,7 +20,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 🏷️ Short Description (Tagline)
 
-> Fast, keyboard-driven application launcher popup and native Quickshell bar widget for Omarchy, powered by GTK4 Layer Shell with automatic theme harmony.
+> Fast, keyboard-driven application launcher popup and native Quickshell bar widget for Omarchy — now with per-app global shortcuts and conflict-aware key suggestions.
 
 ---
 
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+New in 1.1: give any app its own global Hyprland shortcut straight from the launcher. Pick modifiers, press a key or click a free one, and Simple Launcher tells you whether the combination is free, already one of your own bindings, or an Omarchy default — before anything changes.
 
 ---
 
@@ -41,6 +43,10 @@ Whether summoned with a click on the status bar or via a global Hyprland keybind
 - 🟢 **Live Window & Process Tracking**: Inspects Hyprland client states and running processes on the fly. Active applications display glowing indicator dots so you know what's already open.
 - 📦 **Universal Application Discovery**: Indexes system `.desktop` files, user applications in `~/.local/share/applications`, standalone AppImage binaries, and Chromium/Chrome Progressive Web Apps (PWAs).
 - 👁️ **Hidden Apps Management**: Conceal background helpers or clutter from the launcher view with one click. Toggle hidden entries on and off via the header reveal button.
+- ⌨️ **App Shortcuts (new in 1.1)**: Open an app's menu → **Shortcut…** (or press `Ctrl+K`) to bind or remove a global Hyprland shortcut for it. The page lists every shortcut that opens the app — launcher-made and hand-written ones from your config — with their source.
+  - **Free keys first**: Shows free keys for the selected modifiers, sorted alphabetically. Apps that already have a shortcut start with its modifiers; all others start with your default (Super + Shift, changeable with one checkbox).
+  - **Graded conflicts**: ✓ free combos assign directly; ⚠ your own bindings can be replaced with a warning; ⛔ Omarchy defaults need an explicit second confirmation.
+  - **Non-destructive**: Your config files are never edited. Shortcuts live in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`; overriding or turning off a binding is an `hl.unbind` there, so removing the shortcut brings the original back. Every change is checked with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 - 🪶 **Lightweight & Self-Contained**: Runs on standard system Python, GIO, and GTK4. Zero heavy virtual environments, background node daemons, or bloated runtime dependencies.
 
 ---
@@ -58,6 +64,7 @@ Whether summoned with a click on the status bar or via a global Hyprland keybind
 | **Escape** | Clear active search query, or close launcher if search is empty |
 | **Right Arrow** | Open context actions menu (for apps declaring desktop actions) |
 | **Delete** | Close active running window of the selected application |
+| **Ctrl + K** | Manage the global shortcut of the selected application |
 | **Click outside** | Instantly dismiss launcher |
 
 ---

@@ -1,6 +1,5 @@
 import QtQuick
 import Quickshell
-import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -14,11 +13,6 @@ BarWidget {
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  Process {
-    id: toggleProcess
-    command: []
-  }
-
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -28,8 +22,8 @@ BarWidget {
 
     onPressed: function(mouseButton) {
       if (!root.bar) return
-      toggleProcess.command = [root.togglePath]
-      toggleProcess.running = true
+      // Detached so a click is never dropped while a previous toggle is still running.
+      Quickshell.execDetached([root.togglePath])
     }
   }
 }
