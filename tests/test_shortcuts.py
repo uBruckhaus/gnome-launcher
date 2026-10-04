@@ -120,6 +120,19 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn("'/tmp/a b/$(x).desktop'", lua)
         self.assertNotIn('\nhl.exec_cmd("rm")', lua)
 
+    def test_render_lua_comments_cannot_be_broken(self):
+        payload = 'x\rhl.exec_cmd("a")\nb\r\nc\x0bd\x7f'
+        state = {"apps": {"x": {"name": payload, "launch": ["/a.desktop"],
+                                "disabled": [{"mods": ["SUPER"], "key": "F", "description": payload}],
+                                "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "E", "replaces": payload}]}}}
+        lua = shortcuts.render_lua(state)
+        for line in lua.splitlines():
+            if line.startswith("--"):
+                self.assertNotRegex(line, r"[\x00-\x1f\x7f]")
+        # Lua ends a comment at CR or LF; no raw CR may survive anywhere in the file.
+        self.assertNotIn("\r", lua)
+        self.assertIn('-- x hl.exec_cmd("a") b  c d : disabled (was: x hl.exec_cmd("a") b  c d )', lua)
+
     def test_default_mods_round_trip(self):
         original = shortcuts.SETTINGS_FILE
         shortcuts.SETTINGS_FILE = Path(self.tmp.name) / "settings.json"

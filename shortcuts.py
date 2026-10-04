@@ -383,6 +383,11 @@ def lua_string(value):
     return "".join(out)
 
 
+def lua_comment(text):
+    """One-line Lua comment; control characters (CR, LF, ...) would end it early."""
+    return "-- " + "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in str(text))
+
+
 def render_lua(state):
     lines = ["-- Managed by Simple Launcher (ubruckhaus.simple-launcher-for-fools).",
              "-- Edit shortcuts from the launcher; manual changes here are overwritten.", ""]
@@ -390,12 +395,12 @@ def render_lua(state):
         entry = state["apps"][app_id]
         for combo in entry["disabled"]:
             note = f" (was: {combo['description']})" if combo.get("description") else ""
-            lines.append(f"-- {entry['name']}: disabled{note}".replace("\n", " "))
+            lines.append(lua_comment(f"{entry['name']}: disabled{note}"))
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
         command = " ".join(shlex.quote(a) for a in entry["launch"])
         for combo in entry["shortcuts"]:
             note = f" (replaces: {combo['replaces']})" if combo.get("replaces") else ""
-            lines.append(f"-- {entry['name']}{note}".replace("\n", " "))
+            lines.append(lua_comment(f"{entry['name']}{note}"))
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
             lines.append(f"o.bind({lua_string(combo_string(combo))}, {lua_string(entry['name'])}, "
                          f"{{ launch = {lua_string(command)} }})")
