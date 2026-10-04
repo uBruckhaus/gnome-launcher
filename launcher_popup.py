@@ -40,58 +40,21 @@ from launcher_core import (
     save_hidden_apps,
 )
 from palette import ThemePalette
+import pidfile
 import shortcuts
-
-
-def get_pid_file():
-    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime_dir and os.path.isdir(runtime_dir):
-        return Path(runtime_dir) / "simple-launcher-for-fools.pid"
-    return Path("/tmp") / f"simple-launcher-for-fools-{os.getuid()}.pid"
-
-
-def get_process_starttime(pid=None):
-    if pid is None:
-        pid = os.getpid()
-    try:
-        with open(f"/proc/{pid}/stat", "r") as f:
-            content = f.read()
-        after_comm = content[content.rfind(")") + 2:]
-        fields = after_comm.split()
-        return fields[19]
-    except Exception:
-        return ""
 
 
 def write_pid_file():
     try:
-        pid = os.getpid()
-        st = get_process_starttime(pid)
-        exe = str(Path(sys.executable).resolve())
-        script = str(Path(__file__).resolve())
-        get_pid_file().write_text(f"{pid}:{st}:{exe}:{script}\n")
-    except Exception:
+        pidfile.write()
+    except OSError:
         pass
 
 
 def cleanup_pid():
     try:
-        pid = os.getpid()
-        current_st = get_process_starttime(pid)
-        pid_file = get_pid_file()
-        if pid_file.exists():
-            content = pid_file.read_text().strip()
-            parts = content.split(":")
-            stored_pid = parts[0]
-            if stored_pid == str(pid):
-                if len(parts) >= 2 and parts[1]:
-                    if current_st and parts[1] != current_st:
-                        return
-                pid_file.unlink(missing_ok=True)
-        legacy = Path("/tmp/simple-launcher-for-fools.pid")
-        if legacy.exists() and legacy.read_text().strip().split(":")[0] == str(pid):
-            legacy.unlink(missing_ok=True)
-    except Exception:
+        pidfile.remove_if_own()
+    except OSError:
         pass
 
 
@@ -161,7 +124,7 @@ class Launcher(Gtk.Application):
         window.set_child(overlay)
         overlay.set_child(Gtk.Box())
         click = Gtk.GestureClick()
-        click.connect("pressed", self.on_overlay_click)
+        click.connect("released", self.on_overlay_click)  # Close on release so the bar never sees a half-finished click.
         overlay.add_controller(click)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)

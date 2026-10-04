@@ -3,24 +3,40 @@
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
+USER_ID="${UID:-$(id -u)}"
 
-# Resolve canonical interpreter and script path
+# Resolve canonical interpreter and script path. These are the only paths a
+# process is ever compared against; nothing read from the PID file is trusted.
 PYTHON_BIN="/usr/bin/python3"
 [[ -x "$PYTHON_BIN" ]] || PYTHON_BIN="$(command -v python3)"
 CANONICAL_PYTHON="$(readlink -f "$PYTHON_BIN" 2>/dev/null || true)"
 CANONICAL_SCRIPT="$(readlink -f "${DIR}/launcher_popup.py" 2>/dev/null || true)"
 
-# Use user-isolated runtime directory instead of world-writable /tmp
-if [[ -n "${XDG_RUNTIME_DIR:-}" && -d "${XDG_RUNTIME_DIR}" ]]; then
-    PID_FILE="${XDG_RUNTIME_DIR}/simple-launcher-for-fools.pid"
-else
-    PID_FILE="/tmp/simple-launcher-for-fools-${UID:-$(id -u)}.pid"
-fi
+# A directory counts as private when it is a real directory (not a symlink),
+# owned by this user, and closed to group and others.
+is_private_dir() {
+    local dir="$1"
+    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] || return 1
+    local mode
+    mode="$(stat -c %a "$dir" 2>/dev/null || true)"
+    [[ -n "$mode" ]] && (( (8#$mode & 8#077) == 0 ))
+}
 
-# Clean legacy un-scoped /tmp file if present
-if [[ -f "/tmp/simple-launcher-for-fools.pid" ]]; then
-    rm -f "/tmp/simple-launcher-for-fools.pid" 2>/dev/null || true
-fi
+# Never use a shared world-writable location for the PID file: prefer
+# XDG_RUNTIME_DIR, else a per-user 0700 directory under /tmp. If neither is
+# private, run without a PID file and rely on the process scan below.
+resolve_pid_file() {
+    local dir=""
+    if [[ -n "${XDG_RUNTIME_DIR:-}" ]] && is_private_dir "$XDG_RUNTIME_DIR"; then
+        dir="$XDG_RUNTIME_DIR"
+    else
+        dir="/tmp/simple-launcher-for-fools-${USER_ID}"
+        mkdir -m 700 "$dir" 2>/dev/null || true
+        is_private_dir "$dir" || dir=""
+    fi
+    [[ -n "$dir" ]] && echo "${dir}/simple-launcher-for-fools.pid"
+    return 0
+}
 
 # Extract process start time (kernel clock ticks since boot, field 22 in /proc/$pid/stat)
 # Uniquely distinguishes recycled PIDs across process lifetimes.
@@ -41,24 +57,20 @@ get_proc_starttime() {
 # Verify process identity strictly before signaling:
 # 1. PID is numeric and responds to kill -0
 # 2. Process UID matches current user
-# 3. Kernel start time matches recorded start time (prevents PID reuse race)
-# 4. Canonical /proc/$pid/exe strictly matches Python interpreter
-# 5. Canonical script argument from /proc/$pid/cmdline strictly matches launcher_popup.py
+# 3. Kernel start time matches the recorded start time, if one is given (prevents PID reuse race)
+# 4. Canonical /proc/$pid/exe matches this script's Python interpreter
+# 5. Canonical script argument from /proc/$pid/cmdline matches this plugin's launcher_popup.py
 is_launcher_process() {
     local pid="$1"
     local expected_starttime="${2:-}"
-    local expected_exe="${3:-$CANONICAL_PYTHON}"
-    local expected_script="${4:-$CANONICAL_SCRIPT}"
 
     [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]] || return 1
     kill -0 "$pid" 2>/dev/null || return 1
 
-    # 1. UID ownership check
     local proc_uid
     proc_uid="$(stat -c %u "/proc/$pid" 2>/dev/null || true)"
-    [[ "$proc_uid" == "${UID:-$(id -u)}" ]] || return 1
+    [[ "$proc_uid" == "$USER_ID" ]] || return 1
 
-    # 2. Process start time / identity check
     local current_starttime
     current_starttime="$(get_proc_starttime "$pid")"
     [[ -n "$current_starttime" ]] || return 1
@@ -66,12 +78,10 @@ is_launcher_process() {
         return 1
     fi
 
-    # 3. Executable verification (exact canonical Python interpreter)
     local target_exe
     target_exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
-    [[ -n "$target_exe" && ( "$target_exe" == "$expected_exe" || "$target_exe" == "$CANONICAL_PYTHON" ) ]] || return 1
+    [[ -n "$target_exe" && -n "$CANONICAL_PYTHON" && "$target_exe" == "$CANONICAL_PYTHON" ]] || return 1
 
-    # 4. Cmdline verification (exact canonical script path)
     [[ -r "/proc/$pid/cmdline" ]] || return 1
     local -a args
     mapfile -d "" args < "/proc/$pid/cmdline" 2>/dev/null || return 1
@@ -92,38 +102,48 @@ is_launcher_process() {
     [[ -n "$script_arg" ]] || return 1
     local target_script
     target_script="$(readlink -f "$script_arg" 2>/dev/null || true)"
-    [[ -n "$target_script" && "$target_script" == "$expected_script" ]] || return 1
+    [[ -n "$target_script" && -n "$CANONICAL_SCRIPT" && "$target_script" == "$CANONICAL_SCRIPT" ]] || return 1
 
     return 0
 }
 
-# Check recorded PID
-if [[ -f "$PID_FILE" ]]; then
-    local_data="$(head -n 1 "$PID_FILE" 2>/dev/null || true)"
-    IFS=":" read -r rec_pid rec_st rec_exe rec_script <<< "$local_data"
-    if is_launcher_process "$rec_pid" "$rec_st" "$rec_exe" "$rec_script"; then
-        kill -USR1 "$rec_pid" 2>/dev/null || true
-        exit 0
-    else
+main() {
+    local pid_file
+    pid_file="$(resolve_pid_file)"
+
+    # Check recorded PID (only from a regular file this user owns)
+    if [[ -n "$pid_file" && -f "$pid_file" && ! -L "$pid_file" && -O "$pid_file" ]]; then
+        local rec_pid rec_st
+        IFS=":" read -r rec_pid rec_st _ < "$pid_file" || true
+        if is_launcher_process "$rec_pid" "$rec_st"; then
+            kill -USR1 "$rec_pid" 2>/dev/null || true
+            exit 0
+        fi
         # Stale PID file or PID was reused by another program; remove safely
-        rm -f "$PID_FILE" 2>/dev/null || true
+        rm -f "$pid_file" 2>/dev/null || true
     fi
+
+    # Fallback: scan for any running instance matching exact script and current user
+    local p st
+    while IFS= read -r p; do
+        [[ -n "$p" && "$p" != "$$" ]] || continue
+        if is_launcher_process "$p"; then
+            kill -USR1 "$p" 2>/dev/null || true
+            st="$(get_proc_starttime "$p")"
+            [[ -n "$pid_file" ]] && echo "${p}:${st}" > "$pid_file"
+            exit 0
+        fi
+    done < <(pgrep -u "$USER_ID" -f "${CANONICAL_SCRIPT}" 2>/dev/null || true)
+
+    # Not running: start launcher popup in background
+    "$PYTHON_BIN" "${CANONICAL_SCRIPT}" >/dev/null 2>&1 &
+    local child_pid=$!
+    st="$(get_proc_starttime "$child_pid")"
+    [[ -n "$pid_file" ]] && echo "${child_pid}:${st}" > "$pid_file"
+    exit 0
+}
+
+# Sourcing the script (as the tests do) only defines the functions.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-# Fallback: scan for any running instance matching exact script and current user
-while IFS= read -r p; do
-    [[ -n "$p" ]] || continue
-    if [[ "$p" == "$$" ]]; then continue; fi
-    if is_launcher_process "$p" "" "$CANONICAL_PYTHON" "$CANONICAL_SCRIPT"; then
-        kill -USR1 "$p" 2>/dev/null || true
-        st="$(get_proc_starttime "$p")"
-        echo "${p}:${st}:${CANONICAL_PYTHON}:${CANONICAL_SCRIPT}" > "$PID_FILE"
-        exit 0
-    fi
-done < <(pgrep -u "${UID:-$(id -u)}" -f "${CANONICAL_SCRIPT}" 2>/dev/null || true)
-
-# Not running: start launcher popup in background
-"$PYTHON_BIN" "${CANONICAL_SCRIPT}" >/dev/null 2>&1 &
-CHILD_PID=$!
-CHILD_ST="$(get_proc_starttime "$CHILD_PID")"
-echo "${CHILD_PID}:${CHILD_ST}:${CANONICAL_PYTHON}:${CANONICAL_SCRIPT}" > "$PID_FILE"
