@@ -30,6 +30,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
 
+New in 1.2: Omarchy's default app shortcuts show up on their apps, every app's shortcut is shown as a badge in the list, terminal apps like `foot -e claude` are tracked as their own app, and the running badge sits on the app icon.
+
 New in 1.1: give any app its own global Hyprland shortcut straight from the launcher. Pick modifiers, press a key or click a free one, and Simple Launcher tells you whether the combination is free, already one of your own bindings, or an Omarchy default — before anything changes.
 
 ---

@@ -56,8 +56,9 @@ class ShortcutTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def bindings(self, state=None):
-        return shortcuts.Bindings(state or {"apps": {}}, live=self.live, user=self.user)
+    def bindings(self, state=None, defaults=()):
+        return shortcuts.Bindings(state or {"apps": {}}, live=self.live, user=self.user,
+                                  defaults=list(defaults), main_mods=["SUPER", "SHIFT"])
 
     def test_parse_combo_normalizes_modifiers_and_rejects_junk(self):
         self.assertEqual(combo("alt + super + f"), {"mods": ["SUPER", "ALT"], "key": "F"})
@@ -101,14 +102,50 @@ class ShortcutTests(unittest.TestCase):
         found = b.suggestions({"name": "Brave"}, "app", ["SUPER", "CTRL"])
         self.assertTrue(found)
         self.assertTrue(all(c["mods"] == ["SUPER", "CTRL"] for c in found))
-        self.assertIn("B", [c["key"] for c in found])
+        # B is taken with Super + Shift, so it is not offered with other modifiers either.
+        self.assertNotIn("B", [c["key"] for c in found])
+        self.assertIn("R", [c["key"] for c in found])
         self.assertEqual([c["key"] for c in found], sorted(c["key"] for c in found))
         self.assertNotIn("F", [c["key"] for c in b.suggestions({"name": "Firefox"}, "app", ["SUPER"])])
+        # Super + F is taken, but not with the main modifiers, so F is offered elsewhere.
+        self.assertIn("F", [c["key"] for c in b.suggestions({"name": "Firefox"}, "app", ["SUPER", "ALT"])])
 
     def test_external_shortcuts_match_launch_command(self):
         b = self.bindings()
         found = b.external_shortcuts({"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"})
         self.assertEqual([x["description"] for x in found], ["Brave"])
+
+    def test_external_shortcuts_include_live_omarchy_webapp_defaults(self):
+        path = Path(self.tmp.name) / "applications.lua"
+        path.write_text('o.bind("SUPER + SHIFT + Y", "YouTube", { webapp = "https://youtube.com/" })\n'
+                        'o.bind("SUPER + SHIFT + X", "X", { webapp = "https://x.com/" })\n'
+                        'o.bind("SUPER + SHIFT + B", "Browser", { omarchy = "browser" })\n')
+        defaults, _ = shortcuts.parse_user_binds([path])
+        self.live += shortcuts.parse_live_binds(
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: Y\n\tkeycode: 0\n\tdescription: YouTube\n")
+        b = self.bindings(defaults=defaults)
+        for app in ({"name": "YouTube", "exec": "omarchy-launch-webapp https://www.youtube.com"},
+                    {"name": "YouTube", "exec": "chrome --app-id=abc"}):
+            found = b.external_shortcuts(app)
+            self.assertEqual([(x["description"], x["file"]) for x in found], [("YouTube", "Omarchy")])
+        # X is not live (e.g. preinstalled bindings off), so it is not shown.
+        self.assertEqual(b.external_shortcuts({"name": "X", "exec": "omarchy-launch-webapp https://x.com/"}), [])
+
+    def test_external_shortcuts_include_omarchy_launch_defaults(self):
+        path = Path(self.tmp.name) / "applications.lua"
+        path.write_text('o.bind("SUPER + SHIFT + F", "File manager", { omarchy = "nautilus" })\n'
+                        'o.bind("SUPER + ALT + SHIFT + F", "File manager (cwd)", { omarchy = "nautilus-cwd" })\n'
+                        'o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n')
+        defaults, _ = shortcuts.parse_user_binds([path])
+        self.live += shortcuts.parse_live_binds(
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: F\n\tkeycode: 0\n\tdescription: File manager\n\n"
+            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: F\n\tkeycode: 0\n\tdescription: File manager (cwd)\n\n"
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n")
+        b = self.bindings(defaults=defaults)
+        files = {"name": "Files", "exec": "nautilus --new-window", "desktop_id": "org.gnome.Nautilus"}
+        self.assertEqual([x["description"] for x in b.external_shortcuts(files)], ["File manager"])
+        brave = {"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"}
+        self.assertNotIn("Browser", [x["description"] for x in b.external_shortcuts(brave)])
 
     def test_render_lua_quotes_names_and_paths(self):
         state = {"apps": {"x": {"name": 'Evil "name"\nhl.exec_cmd("rm")',

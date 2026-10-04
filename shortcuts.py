@@ -41,6 +41,9 @@ FREE, SAME, LAUNCHER, CUSTOM, OMARCHY = "free", "same", "launcher", "custom", "o
 _KEY_RE = re.compile(r"^(code:\d{1,3}|[A-Za-z0-9_]{1,32})$")
 _BIND_RE = re.compile(r'\b(?:o\.bind(?:_toggle)?|hl\.bind)\(\s*"([^"]+)"\s*(?:,\s*"([^"]*)")?(.*)')
 _UNBIND_RE = re.compile(r'\bhl\.unbind\(\s*"([^"]+)"')
+_WEBAPP_RE = re.compile(r'\bwebapp\s*=\s*"([^"]+)"')
+_OMARCHY_RE = re.compile(r'\bomarchy\s*=\s*"([^"]+)"')
+_URL_RE = re.compile(r'https?://[^\s"\']+')
 
 
 # --- combos ------------------------------------------------------------------
@@ -144,6 +147,15 @@ def user_config_files():
     """User Lua files that may bind keys, excluding the generated one."""
     try:
         return sorted(p for p in HYPR_DIR.glob("*.lua") if p.name != LUA_FILE.name)
+    except OSError:
+        return []
+
+
+def omarchy_binding_files():
+    """Omarchy's stock binding files, read-only."""
+    root = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
+    try:
+        return sorted((root / "default/hypr/bindings").glob("*.lua"))
     except OSError:
         return []
 
@@ -270,10 +282,13 @@ def app_key(app):
 class Bindings:
     """Snapshot of who owns which key combination right now."""
 
-    def __init__(self, state, live=None, user=None):
+    def __init__(self, state, live=None, user=None, defaults=None, main_mods=None):
         self.state = state
         self.live = read_live_binds() if live is None else live
         self.user_binds, self.user_unbinds = parse_user_binds() if user is None else user
+        self.main_mods = main_mods
+        self.default_binds = (parse_user_binds(omarchy_binding_files())[0]
+                              if defaults is None else defaults)
 
     def _launcher_owner(self, combo, ids):
         mask = modmask(combo)
@@ -313,6 +328,17 @@ class Bindings:
             return OMARCHY, live[-1]["description"] or "Omarchy binding"
         return FREE, ""
 
+    def used_letters(self):
+        """Keys taken with the main modifiers (the default set, e.g. Super +
+        Shift): live binds, user files and launcher shortcuts."""
+        main = make_combo(load_default_mods() if self.main_mods is None else self.main_mods, "A")
+        mask = modmask(main) if main else MOD_BITS["SUPER"] | MOD_BITS["SHIFT"]
+        used = {b["key"] for b in self.live if b["mask"] == mask}
+        used |= {b["combo"]["key"].casefold() for b in self.user_binds if modmask(b["combo"]) == mask}
+        used |= {sc["key"].casefold() for entry in self.state["apps"].values()
+                 for sc in entry["shortcuts"] if modmask(sc) == mask}
+        return used
+
     def suggestions(self, app, app_id, mods=None, limit=8):
         """Free combos for this app, letters of its name first.
 
@@ -322,6 +348,9 @@ class Bindings:
         name = re.sub(r"[^A-Za-z0-9]", "", app.get("name", "")).upper()
         name_letters = [c for c in dict.fromkeys(name) if c.isalpha()]
         keys = name_letters + [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if c not in name_letters]
+        # A letter taken with the main modifiers is not offered with any
+        # others either, so suggestions never look like they reuse e.g. YouTube's Y.
+        keys = [k for k in keys if k.casefold() not in self.used_letters()]
         if mods:
             found = []
             for key in keys:
@@ -343,7 +372,8 @@ class Bindings:
         return found
 
     def external_shortcuts(self, app):
-        """Hand-written user binds that appear to launch this app."""
+        """Hand-written user binds and live Omarchy defaults that appear to
+        launch this app."""
         needles = set()
         desktop_id = app.get("desktop_id", "")
         if desktop_id:
@@ -352,18 +382,48 @@ class Bindings:
             program = Path(shlex.split(app.get("exec", ""))[0]).name.casefold()
         except (ValueError, IndexError):
             program = ""
-        result = []
-        for bind in self.user_binds:
+        urls = {_normalize_url(u) for u in _URL_RE.findall(app.get("exec", ""))}
+        is_web_app = "--app-id" in app.get("exec", "") or program == "omarchy-launch-webapp"
+        name = app.get("name", "").casefold()
+        # org.gnome.Nautilus -> nautilus, the name omarchy-launch-* uses.
+        short_id = desktop_id.casefold().removesuffix(".desktop").rsplit(".", 1)[-1]
+
+        def launches_app(bind):
             command = bind["command"].casefold()
+            webapp = _WEBAPP_RE.search(bind["command"])
+            if webapp:
+                return (_normalize_url(webapp.group(1)) in urls
+                        or (is_web_app and name and name == bind["description"].casefold()))
+            omarchy = _OMARCHY_RE.search(bind["command"])
+            if omarchy:
+                target = omarchy.group(1).casefold()
+                return target in {program, short_id} - {""}
             words = set(re.findall(r"[\w.\-]+", command))
-            launches = "launch" in command or "exec" in command or "gtk-launch" in command
-            if not launches:
+            if not ("launch" in command or "exec" in command or "gtk-launch" in command):
+                return False
+            return any(n in words or n + ".desktop" in words for n in needles) or (
+                program and program not in {"env", "sh", "bash", "flatpak", "gtk-launch", "python3",
+                                            "omarchy-launch-webapp"}
+                and program in words)
+
+        result = [bind for bind in self.user_binds if launches_app(bind)]
+        user_ids = {combo_id(b["combo"]) for b in self.user_binds} | self.user_unbinds
+        for bind in self.default_binds:
+            cid = combo_id(bind["combo"])
+            # Only defaults Hyprland actually has: not overridden by the user,
+            # not gated off (e.g. preinstalled bindings disabled).
+            if cid in user_ids or not any(
+                    (b["mask"], b["key"]) == cid and b["description"] == bind["description"]
+                    for b in self.live):
                 continue
-            if any(n in words or n + ".desktop" in words for n in needles) or (
-                    program and program not in {"env", "sh", "bash", "flatpak", "gtk-launch", "python3"}
-                    and program in words):
-                result.append(bind)
+            if launches_app(bind):
+                result.append({**bind, "file": "Omarchy"})
         return result
+
+
+def _normalize_url(url):
+    url = re.sub(r"^https?://", "", url.strip().casefold())
+    return re.sub(r"^www\.", "", url).rstrip("/")
 
 
 # --- writing -----------------------------------------------------------------

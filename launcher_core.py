@@ -325,6 +325,40 @@ def app_window_classes(app):
     return {name.casefold() for name in names if name}
 
 
+def terminal_command(app):
+    """For a terminal launcher like `foot -e /path/claude`, the command's
+    name ("claude"); None for anything else."""
+    try:
+        args = shlex.split(app.get("exec", ""))
+    except ValueError:
+        return None
+    if not args or Path(args[0]).name.casefold() not in TERMINALS:
+        return None
+    for flag in ("-e", "--command", "--"):
+        if flag in args:
+            rest = args[args.index(flag) + 1:]
+            return Path(rest[0]).name.casefold() if rest else None
+    return None
+
+
+def child_process_names(pid):
+    """Names of a process's direct children: exe and argv[0..1] basenames, so
+    scripts (bash pi-with-llama) and node tools (node codex) are found too."""
+    names = set()
+    try:
+        children = Path(f"/proc/{int(pid)}/task/{int(pid)}/children").read_text().split()
+    except (OSError, ValueError, TypeError):
+        return names
+    for child in children:
+        try:
+            names.add(Path(os.readlink(f"/proc/{child}/exe")).name.casefold())
+            argv = Path(f"/proc/{child}/cmdline").read_bytes().split(b"\0")[:2]
+            names.update(Path(a.decode(errors="replace")).name.casefold() for a in argv if a)
+        except OSError:
+            continue
+    return names
+
+
 def client_matches_app(client, app, classes=None):
     if classes is None:
         classes = app_window_classes(app)
@@ -448,6 +482,9 @@ def resolve_icon(raw_icon):
     return _hicolor_fallback(icon_name) if icon_name else QIcon()
 
 
+TERMINALS = {"foot", "footclient", "alacritty", "kitty", "ghostty", "wezterm", "xterm"}
+
+
 def app_process_name(app):
     try:
         args = shlex.split(app["exec"])
@@ -463,7 +500,23 @@ def app_process_name(app):
     # Shared interpreters/wrappers cannot identify an individual application.
     if name in {"sh", "bash", "env", "flatpak", "gtk-launch", "python", "python3", "java"}:
         return None
+    # A terminal running a command (foot -e claude) is the terminal's process,
+    # often a shared server; such apps are found by their window instead.
+    if name in TERMINALS and ("-e" in args or "--command" in args):
+        return None
     return name
+
+
+def process_pids(name):
+    """PIDs of the user's processes whose executable is called name."""
+    pids = set()
+    for process in Path("/proc").glob("[0-9]*"):
+        try:
+            if process.stat().st_uid == os.getuid() and Path(os.readlink(process / "exe")).name.casefold() == name:
+                pids.add(int(process.name))
+        except (OSError, ValueError):
+            continue
+    return pids
 
 
 def background_process_names():

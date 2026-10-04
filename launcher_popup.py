@@ -35,7 +35,8 @@ else:
 import atexit
 import copy
 from launcher_core import (
-    app_process_name, background_process_names, client_matches_app,
+    TERMINALS, app_process_name, background_process_names, child_process_names, client_matches_app,
+    process_pids, terminal_command,
     launch_action, launch_app, load_hidden_apps, parse_desktop_files,
     save_hidden_apps,
 )
@@ -78,10 +79,12 @@ class Launcher(Gtk.Application):
         self.hidden_ids = load_hidden_apps()
         self.show_hidden = False
         self.clients = []
+        self.window_children = {}  # pid -> child process names, per refresh.
         self.process_names = set()
         self.theme = ThemePalette()
         self.search_query = ""
         self.shortcut_state = shortcuts.load_state()
+        self.list_bindings = None  # Snapshot for the list chips, refreshed on open.
         self.shortcut_app = None
         self.shortcut_bindings = None
 
@@ -255,6 +258,18 @@ class Launcher(Gtk.Application):
         }}
         .launcher-muted {{ color: {colors['muted']}; }}
         .launcher-running {{ color: {colors['red']}; }}
+        /* Run badge on the app icon: bright fill, ring in the row colour to
+           cut it out from icon and list, hairline so it shows on dark icons. */
+        .launcher-run-dot {{
+            min-width: 8px; min-height: 8px;
+            border-radius: 999px;
+            border: 2px solid {colors['background']};
+            box-shadow: 0 0 0 1px alpha({colors['foreground']}, 0.35);
+            margin: 0 -3px -3px 0;
+        }}
+        .launcher-run-dot.active {{ background: {colors['green']}; }}
+        .launcher-run-dot.background {{ background: {colors['yellow']}; }}
+        .launcher-list row:selected .launcher-run-dot {{ border-color: {sel_hex}; }}
 
         /* Popover / submenu styling */
         popover.launcher-popover contents, popover contents {{
@@ -418,6 +433,8 @@ class Launcher(Gtk.Application):
         self.style_provider = provider
 
     def open(self):
+        self.shortcut_state = shortcuts.load_state()
+        self.list_bindings = None
         try:
             self.apps = parse_desktop_files()
         except Exception as e:
@@ -588,14 +605,43 @@ class Launcher(Gtk.Application):
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass
         self.process_names = background_process_names()
+        self.window_children = {}
         return previous != (self.clients, self.process_names)
 
+    def window_matches(self, client, app):
+        """Whether this window belongs to app. A terminal window running a
+        command another app launches (foot -e claude) belongs to that app,
+        not to the terminal itself."""
+        children = self.window_children.get(client.get("pid"))
+        if children is None:
+            children = self.window_children[client.get("pid")] = child_process_names(client.get("pid"))
+        command = terminal_command(app)
+        if command:
+            if command in children:
+                return True
+        elif children & self.terminal_commands():
+            return False
+        return client_matches_app(client, app)
+
+    def terminal_commands(self):
+        return {c for a in self.apps if (c := terminal_command(a))}
+
     def app_state(self, app):
-        if any(client_matches_app(client, app) for client in self.clients):
+        if any(self.window_matches(client, app) for client in self.clients):
             return "active"
-        if app_process_name(app) in self.process_names:
+        name = app_process_name(app)
+        if name in self.process_names:
+            if name in TERMINALS and not self.terminal_runs_on_its_own(name):
+                return "stopped"
             return "background"
         return "stopped"
+
+    def terminal_runs_on_its_own(self, name):
+        """Whether a terminal process exists that is not just the window of
+        another app (foot -e claude belongs to Claude CLI, not to Foot)."""
+        claimed = {client.get("pid") for client in self.clients
+                   if self.window_children.get(client.get("pid"), set()) & self.terminal_commands()}
+        return bool(process_pids(name) - claimed)
 
     def refresh_list(self, selected_id=None):
         self.update_title()
@@ -606,6 +652,8 @@ class Launcher(Gtk.Application):
         while child := self.rows.get_first_child():
             self.rows.remove(child)
         query = self.search_query.casefold().strip()
+        if self.list_bindings is None:
+            self.list_bindings = shortcuts.Bindings(self.shortcut_state)
         for app in self.apps:
             is_hidden = app["desktop_id"] in self.hidden_ids
             if is_hidden and not self.show_hidden:
@@ -625,7 +673,22 @@ class Launcher(Gtk.Application):
             icon.set_valign(Gtk.Align.CENTER)
             if is_hidden:
                 icon.add_css_class("launcher-hidden-icon")
-            line.append(icon)
+            # The run dot sits on the icon's corner, like a dock, so the
+            # shortcut chips on the right always line up.
+            icon_slot = Gtk.Overlay()
+            icon_slot.set_valign(Gtk.Align.CENTER)
+            icon_slot.set_child(icon)
+            state = self.app_state(app)
+            if state != "stopped":
+                dot = Gtk.Box()
+                dot.add_css_class("launcher-run-dot")
+                dot.add_css_class(state)
+                dot.set_halign(Gtk.Align.END)
+                dot.set_valign(Gtk.Align.END)
+                dot.set_can_target(False)
+                icon_slot.add_overlay(dot)
+                icon_slot.set_tooltip_text("Open windows" if state == "active" else "Running in background")
+            line.append(icon_slot)
 
             text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
             text_box.set_hexpand(True)
@@ -665,7 +728,7 @@ class Launcher(Gtk.Application):
                 row.set_tooltip_text(f"{prefix}{app['name']}")
 
             line.append(text_box)
-            assigned = self.shortcut_state["apps"].get(shortcuts.app_key(app), {}).get("shortcuts", [])
+            assigned = self.app_shortcuts(app, self.list_bindings)
             if assigned:
                 chip = Gtk.Label(label=shortcuts.combo_label(assigned[0]).replace(" + ", "+"))
                 chip.add_css_class("launcher-shortcut-chip")
@@ -673,12 +736,6 @@ class Launcher(Gtk.Application):
                 chip.set_tooltip_text("Global shortcut" + ("s: " if len(assigned) > 1 else ": ")
                                       + ", ".join(shortcuts.combo_label(c) for c in assigned))
                 line.append(chip)
-            state = self.app_state(app)
-            if state != "stopped":
-                dot = Gtk.Label(label="●")
-                dot.add_css_class("launcher-running" if state == "active" else "launcher-muted")
-                dot.set_tooltip_text("Open windows" if state == "active" else "Running in background")
-                line.append(dot)
             actions = Gtk.Button(icon_name="open-menu-symbolic")
             actions.add_css_class("flat")
             actions.set_tooltip_text("App actions")
@@ -922,14 +979,17 @@ class Launcher(Gtk.Application):
         except Exception:
             pass
 
-    def active_app_shortcuts(self):
-        """Combos that open this app right now: launcher ones, then hand-written."""
-        entry = self.shortcut_state["apps"].get(self.sc_app_id, {"shortcuts": [], "disabled": []})
+    def app_shortcuts(self, app, bindings):
+        """Combos that open app right now: launcher ones, then external ones."""
+        entry = self.shortcut_state["apps"].get(shortcuts.app_key(app), {"shortcuts": [], "disabled": []})
         disabled_ids = {shortcuts.combo_id(c) for c in entry["disabled"]}
         owned_ids = {shortcuts.combo_id(c) for e in self.shortcut_state["apps"].values() for c in e["shortcuts"]}
-        external = [b["combo"] for b in self.shortcut_bindings.external_shortcuts(self.shortcut_app)
+        external = [b["combo"] for b in bindings.external_shortcuts(app)
                     if shortcuts.combo_id(b["combo"]) not in disabled_ids | owned_ids]
         return list(entry["shortcuts"]) + external
+
+    def active_app_shortcuts(self):
+        return self.app_shortcuts(self.shortcut_app, self.shortcut_bindings)
 
     def render_shortcut_current(self):
         """Active shortcuts (any source) with Remove, then turned-off ones."""
@@ -1185,6 +1245,7 @@ class Launcher(Gtk.Application):
             return False
         self.shortcut_state = shortcuts.load_state()
         self.shortcut_bindings = shortcuts.Bindings(self.shortcut_state)
+        self.list_bindings = self.shortcut_bindings
         self.render_shortcut_current()
         self.sc_key, self.sc_keycode, self.sc_confirm = None, None, False
         self.show_shortcut_keys(None)
@@ -1295,7 +1356,7 @@ class Launcher(Gtk.Application):
 
     def close_app(self, app):
         for client in self.clients:
-            if client_matches_app(client, app) and client.get("address", "").startswith("0x"):
+            if self.window_matches(client, app) and client.get("address", "").startswith("0x"):
                 command = "hl.dsp.window.close({window = " + json.dumps("address:" + client["address"]) + "})"
                 subprocess.Popen(["hyprctl", "dispatch", command],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
