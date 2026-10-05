@@ -436,6 +436,13 @@ class Launcher(Gtk.Application):
             padding: 0 4px;
         }}
         .launcher-list row:selected > box > box > .launcher-shortcut-chip {{ color: {sel_desc_fg}; border-color: alpha({sel_desc_fg}, 0.5); }}
+        /* Same chip look in the app menu, which otherwise takes the menu label font. */
+        .launcher-menu-item label.launcher-shortcut-chip {{
+            font-size: 10px; font-weight: normal; color: {colors['foreground']};
+        }}
+        .launcher-menu-item:hover label.launcher-shortcut-chip {{
+            font-weight: normal; color: {sel_desc_fg}; border-color: alpha({sel_desc_fg}, 0.5);
+        }}
         .launcher-shortcut-more {{ font-size: 9px; font-weight: 700; color: {colors['background']};
             background: alpha({muted_hex}, 0.8); border-radius: 999px; padding: 0 4px; }}
         .launcher-list row:selected .launcher-shortcut-more {{ background: {sel_desc_fg}; }}
