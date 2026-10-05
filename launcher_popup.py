@@ -306,17 +306,17 @@ class Launcher(Gtk.Application):
         .launcher-list row:selected .launcher-app-name {{ color: {sel_fg}; font-weight: 600; }}
         .launcher-list row:selected .launcher-app-desc {{ color: {sel_desc_fg}; opacity: 0.95; }}
         .launcher-list row:selected > box > button {{ color: {sel_fg}; }}
-        .launcher-list row button.flat {{
+        .launcher-list row > box > button.flat {{
             background: transparent;
             border: none;
             box-shadow: none;
             border-radius: {radius}px;
             padding: 4px;
         }}
-        .launcher-list row button.flat:hover {{
+        .launcher-list row > box > button.flat:hover {{
             background: rgba(255, 255, 255, 0.1);
         }}
-        .launcher-list row:selected button.flat:hover {{
+        .launcher-list row:selected > box > button.flat:hover {{
             background: rgba(0, 0, 0, 0.12);
         }}
         .launcher-muted {{ color: {colors['muted']}; }}
@@ -435,7 +435,7 @@ class Launcher(Gtk.Application):
             border-radius: {radius}px;
             padding: 0 4px;
         }}
-        .launcher-list row:selected .launcher-shortcut-chip {{ color: {sel_desc_fg}; border-color: alpha({sel_desc_fg}, 0.5); }}
+        .launcher-list row:selected > box > box > .launcher-shortcut-chip {{ color: {sel_desc_fg}; border-color: alpha({sel_desc_fg}, 0.5); }}
         .launcher-shortcut-more {{ font-size: 9px; font-weight: 700; color: {colors['background']};
             background: alpha({muted_hex}, 0.8); border-radius: 999px; padding: 0 4px; }}
         .launcher-list row:selected .launcher-shortcut-more {{ background: {sel_desc_fg}; }}
