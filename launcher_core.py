@@ -98,7 +98,7 @@ def parse_desktop_files():
                 continue
             seen_desktop_ids.add(desktop_id)
 
-            values, section = {}, None
+            values, section, action_execs = {}, None, {}
             try:
                 for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
                     line = raw.strip()
@@ -107,6 +107,8 @@ def parse_desktop_files():
                     elif section == "Desktop Entry" and "=" in line:
                         key, value = line.split("=", 1)
                         values[key] = value
+                    elif (section or "").startswith("Desktop Action ") and line.startswith("Exec="):
+                        action_execs[section.removeprefix("Desktop Action ")] = line[5:]
             except OSError:
                 continue
             name, command = values.get("Name"), values.get("Exec")
@@ -132,7 +134,8 @@ def parse_desktop_files():
             try:
                 info = GioUnix.DesktopAppInfo.new_from_filename(str(path))
                 if info:
-                    actions = [{"id": action, "name": info.get_action_name(action)}
+                    actions = [{"id": action, "name": info.get_action_name(action),
+                                "exec": action_execs.get(action, "")}
                                for action in info.list_actions()]
             except Exception:
                 actions = []

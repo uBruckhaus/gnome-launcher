@@ -56,9 +56,10 @@ class ShortcutTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def bindings(self, state=None, defaults=()):
+    def bindings(self, state=None, defaults=(), default_apps=None):
         return shortcuts.Bindings(state or {"apps": {}}, live=self.live, user=self.user,
-                                  defaults=list(defaults), main_mods=["SUPER", "SHIFT"])
+                                  defaults=list(defaults), main_mods=["SUPER", "SHIFT"],
+                                  default_apps=default_apps or {"terminal": "", "browser": "", "editor": ""})
 
     def test_parse_combo_normalizes_modifiers_and_rejects_junk(self):
         self.assertEqual(combo("alt + super + f"), {"mods": ["SUPER", "ALT"], "key": "F"})
@@ -146,6 +147,126 @@ class ShortcutTests(unittest.TestCase):
         self.assertEqual([x["description"] for x in b.external_shortcuts(files)], ["File manager"])
         brave = {"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"}
         self.assertNotIn("Browser", [x["description"] for x in b.external_shortcuts(brave)])
+
+    def test_external_shortcuts_map_omarchy_terminal_to_default_terminal(self):
+        path = Path(self.tmp.name) / "applications.lua"
+        path.write_text('o.bind("SUPER + RETURN", "Terminal", { omarchy = "terminal" })\n')
+        defaults, _ = shortcuts.parse_user_binds([path])
+        self.live += shortcuts.parse_live_binds(
+            "bindd\n\tmodmask: 64\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Terminal\n")
+        foot = {"name": "Foot", "exec": "foot", "desktop_id": "foot"}
+        kitty = {"name": "kitty", "exec": "kitty", "desktop_id": "kitty"}
+        b = self.bindings(defaults=defaults, default_apps={"terminal": "foot", "browser": ""})
+        self.assertEqual([shortcuts.combo_label(x["combo"]) for x in b.external_shortcuts(foot)],
+                         ["Super + Enter"])
+        self.assertEqual(b.external_shortcuts(kitty), [])
+        self.assertEqual(self.bindings(defaults=defaults).external_shortcuts(foot), [])
+
+    def test_external_shortcuts_map_omarchy_browser_to_default_browser(self):
+        path = Path(self.tmp.name) / "applications.lua"
+        path.write_text('o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n'
+                        'o.bind("SUPER + SHIFT + ALT + B", "Browser (private)", { omarchy = "browser --private" })\n')
+        defaults, _ = shortcuts.parse_user_binds([path])
+        self.live += shortcuts.parse_live_binds(
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n\n"
+            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: B\n\tkeycode: 0\n\tdescription: Browser (private)\n")
+        chrome = {"name": "Google Chrome", "exec": "/usr/bin/google-chrome-stable %U",
+                  "desktop_id": "google-chrome"}
+        b = self.bindings(defaults=defaults, default_apps={"terminal": "", "browser": "google-chrome"})
+        # Only the plain browser bind: the private one opens an incognito window.
+        self.assertEqual([shortcuts.combo_label(x["combo"]) for x in b.external_shortcuts(chrome)],
+                         ["Super + Shift + Enter"])
+        self.assertEqual(self.bindings(defaults=defaults).external_shortcuts(chrome), [])
+
+    CHROME = {"name": "Google Chrome", "exec": "/usr/bin/google-chrome-stable", "desktop_id": "google-chrome",
+              "desktop_path": "/usr/share/applications/google-chrome.desktop",
+              "actions": [{"id": "new-window", "name": "New Window", "exec": "/usr/bin/google-chrome-stable"},
+                          {"id": "new-private-window", "name": "New Incognito Window",
+                           "exec": "/usr/bin/google-chrome-stable --incognito"}]}
+
+    def omarchy_defaults(self, text, live):
+        path = Path(self.tmp.name) / "applications.lua"
+        path.write_text(text)
+        defaults, _ = shortcuts.parse_user_binds([path])
+        self.live += shortcuts.parse_live_binds(live)
+        return defaults
+
+    def test_comments_do_not_cut_double_dashes_inside_strings(self):
+        self.assertEqual(shortcuts._strip_lua_comment('o.bind("A", "B", { omarchy = "browser --private" }) -- x'),
+                         'o.bind("A", "B", { omarchy = "browser --private" }) ')
+        self.assertEqual(shortcuts._strip_lua_comment('-- o.bind("A")'), "")
+
+    def test_omarchy_private_browser_maps_to_private_window_action(self):
+        defaults = self.omarchy_defaults(
+            'o.bind("SUPER + SHIFT + ALT + B", "Browser (private)", { omarchy = "browser --private" })\n',
+            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: B\n\tkeycode: 0\n\tdescription: Browser (private)\n")
+        b = self.bindings(defaults=defaults, default_apps={"browser": "google-chrome"})
+        self.assertEqual([(shortcuts.combo_label(x["combo"]), x["action"]) for x in b.external_shortcuts(self.CHROME)],
+                         [("Super + Shift + Alt + B", "new-private-window")])
+
+    def test_default_browser_does_not_claim_its_web_apps(self):
+        defaults = self.omarchy_defaults(
+            'o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n',
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n")
+        b = self.bindings(defaults=defaults, default_apps={"browser": "google-chrome"})
+        pwa = {"name": "Netflix", "exec": "/opt/google/chrome/google-chrome --app-id=abc",
+               "desktop_id": "chrome-abc-Default"}
+        self.assertEqual(b.external_shortcuts(pwa), [])
+        self.assertEqual(len(b.external_shortcuts(self.CHROME)), 1)
+
+    def test_tui_and_editor_defaults_match_their_programs(self):
+        defaults = self.omarchy_defaults(
+            'o.bind("SUPER + CTRL + T", "Activity", { tui = "btop" })\n'
+            'o.bind("SUPER + SHIFT + N", "Editor", { omarchy = "editor" })\n',
+            "bindd\n\tmodmask: 68\n\tsubmap:\n\tkey: T\n\tkeycode: 0\n\tdescription: Activity\n\n"
+            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: N\n\tkeycode: 0\n\tdescription: Editor\n")
+        b = self.bindings(defaults=defaults, default_apps={"editor": "nvim"})
+        btop = {"name": "btop++", "exec": "btop", "desktop_id": "btop"}
+        nvim = {"name": "Neovim", "exec": "nvim", "desktop_id": "nvim"}
+        self.assertEqual([x["description"] for x in b.external_shortcuts(btop)], ["Activity"])
+        self.assertEqual([x["description"] for x in b.external_shortcuts(nvim)], ["Editor"])
+
+    def test_user_bind_with_action_arguments_maps_to_that_action(self):
+        path = Path(self.tmp.name) / "mine.lua"
+        path.write_text('o.bind("SUPER + ALT + I", "Incognito", { launch = "google-chrome-stable --incognito" })\n')
+        b = self.bindings()
+        b.user_binds, b.user_unbinds = shortcuts.parse_user_binds([path])
+        self.assertEqual([x["action"] for x in b.external_shortcuts(self.CHROME)], ["new-private-window"])
+
+    def test_classify_treats_existing_same_binding_as_duplicate(self):
+        b = self.bindings()
+        brave = {"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"}
+        self.assertEqual(b.classify(combo("SUPER + SHIFT + B"), "brave", app=brave)[0], shortcuts.SAME)
+        self.assertEqual(b.classify(combo("SUPER + SHIFT + B"), "brave")[0], shortcuts.CUSTOM)
+
+    def test_launcher_shortcut_with_other_action_is_a_retarget(self):
+        state = {"apps": {"chrome": {"name": "Google Chrome", "launch": ["/x/google-chrome.desktop"], "disabled": [],
+                                     "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "C", "action": ""}]}}}
+        b = self.bindings(state)
+        self.assertEqual(b.classify(combo("SUPER + ALT + C"), "chrome", action="new-private-window"),
+                         (shortcuts.RETARGET, ""))
+        self.assertEqual(b.classify(combo("SUPER + ALT + C"), "chrome")[0], shortcuts.SAME)
+
+    def test_render_lua_launches_desktop_actions(self):
+        state = {"apps": {"chrome": {"name": "Google Chrome", "launch": ["/x/google-chrome.desktop"], "disabled": [],
+                                     "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "I", "replaces": "",
+                                                    "action": "new-private-window"}]}}}
+        lua = shortcuts.render_lua(state)
+        self.assertIn('{ launch = "/x/google-chrome.desktop:new-private-window" }', lua)
+        self.assertEqual(shortcuts.shortcut_launch(["/a/b"], "x"), ["/a/b"])
+
+    def test_prune_missing_drops_uninstalled_apps_only(self):
+        tmp = Path(self.tmp.name)
+        (tmp / "kept.desktop").write_text("")
+        (tmp / "kept.AppImage").write_text("")
+        entry = lambda launch: {"name": launch, "launch": [launch], "disabled": [],
+                                "shortcuts": [{"mods": ["SUPER"], "key": "K"}]}
+        state = {"apps": {k: entry(str(tmp / k)) for k in
+                          ("kept.desktop", "gone.desktop", "kept.AppImage", "gone.AppImage")}}
+        state["apps"]["unmounted"] = entry("/media/nothing-here/x.AppImage")
+        removed = shortcuts.prune_missing(state)
+        self.assertEqual(sorted(Path(e["name"]).name for e in removed), ["gone.AppImage", "gone.desktop"])
+        self.assertEqual(sorted(state["apps"]), ["kept.AppImage", "kept.desktop", "unmounted"])
 
     def test_render_lua_quotes_names_and_paths(self):
         state = {"apps": {"x": {"name": 'Evil "name"\nhl.exec_cmd("rm")',

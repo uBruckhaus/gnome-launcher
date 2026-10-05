@@ -37,12 +37,16 @@ MOD_LABELS = {"SUPER": "Super", "SHIFT": "Shift", "CTRL": "Ctrl", "ALT": "Alt"}
 
 # Conflict classes, from harmless to dangerous.
 FREE, SAME, LAUNCHER, CUSTOM, OMARCHY = "free", "same", "launcher", "custom", "omarchy"
+# The key already opens this app, but a different action of it.
+RETARGET = "retarget"
 
 _KEY_RE = re.compile(r"^(code:\d{1,3}|[A-Za-z0-9_]{1,32})$")
 _BIND_RE = re.compile(r'\b(?:o\.bind(?:_toggle)?|hl\.bind)\(\s*"([^"]+)"\s*(?:,\s*"([^"]*)")?(.*)')
 _UNBIND_RE = re.compile(r'\bhl\.unbind\(\s*"([^"]+)"')
 _WEBAPP_RE = re.compile(r'\bwebapp\s*=\s*"([^"]+)"')
 _OMARCHY_RE = re.compile(r'\bomarchy\s*=\s*"([^"]+)"')
+_TUI_RE = re.compile(r'\btui\s*=\s*"([^"]+)"')
+_ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _URL_RE = re.compile(r'https?://[^\s"\']+')
 
 
@@ -160,6 +164,25 @@ def omarchy_binding_files():
         return []
 
 
+def _strip_lua_comment(line):
+    """The line up to a `--` comment, keeping `--` inside quoted strings."""
+    quote = None
+    i = 0
+    while i < len(line):
+        ch = line[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif line.startswith("--", i):
+            return line[:i]
+        i += 1
+    return line
+
+
 def parse_user_binds(files=None):
     """Literal binds still in effect from the user's files, plus combos the
     user unbound without binding again. Later lines win, like Hyprland."""
@@ -170,7 +193,7 @@ def parse_user_binds(files=None):
         except OSError:
             continue
         for line in lines:
-            code = line.split("--", 1)[0]
+            code = _strip_lua_comment(line)
             match = _BIND_RE.search(code)
             if match:
                 combo = parse_combo(match.group(1))
@@ -189,6 +212,55 @@ def parse_user_binds(files=None):
                 binds = [b for b in binds if combo_id(b["combo"]) != cid]
                 unbinds.add(cid)
     return binds, unbinds
+
+
+# Omarchy launch targets that open whichever app the user picked as default,
+# with the command Omarchy asks to find it.
+DEFAULT_APP_COMMANDS = {
+    "terminal": ["xdg-terminal-exec", "--print-id"],
+    "browser": ["xdg-settings", "get", "default-web-browser"],
+}
+EDITOR_STATE = Path.home() / ".local/state/omarchy/defaults/editor"
+DEFAULT_APP_ROLES = (*DEFAULT_APP_COMMANDS, "editor")
+
+
+def default_app_id(role):
+    """Desktop id (without .desktop) or program name of the app
+    `omarchy = "<role>"` opens; "" when unknown."""
+    if role == "editor":
+        # omarchy-launch-editor: the saved choice, else nvim.
+        try:
+            words = EDITOR_STATE.read_text().split()
+        except OSError:
+            words = []
+        return Path(words[0]).name if words else "nvim"
+    env = {k: v for k, v in os.environ.items() if k != "BROWSER"}
+    try:
+        result = subprocess.run(DEFAULT_APP_COMMANDS[role], capture_output=True,
+                                text=True, timeout=2, env=env)
+    except (KeyError, OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    lines = result.stdout.strip().splitlines()
+    # An entry may carry an action suffix: "foot.desktop:server".
+    return lines[0].split(":", 1)[0].removesuffix(".desktop") if lines else ""
+
+
+def private_action(app):
+    """The app's private/incognito window action id, or None."""
+    for action in app.get("actions", []):
+        if action["id"] in ("new-private-window", "private-window") or \
+                re.search(r"private|incognito", action.get("name", ""), re.I):
+            return action["id"]
+    return None
+
+
+def action_name(app, action_id):
+    for action in app.get("actions", []):
+        if action["id"] == action_id:
+            return action["name"]
+    return action_id
 
 
 # --- state -------------------------------------------------------------------
@@ -238,18 +310,40 @@ def load_state():
             combo = make_combo(item.get("mods", []), item.get("key", "")) if isinstance(item, dict) else None
             if combo:
                 combo["replaces"] = str(item.get("replaces", ""))[:120]
+                action = str(item.get("action", ""))
+                combo["action"] = action if _ACTION_RE.match(action) else ""
                 shortcuts.append(combo)
         disabled = []
         for item in entry.get("disabled", []):
             combo = make_combo(item.get("mods", []), item.get("key", "")) if isinstance(item, dict) else None
             if combo:
                 combo["description"] = str(item.get("description", ""))[:120]
+                combo["source"] = str(item.get("source", ""))[:60]
                 disabled.append(combo)
         launch = entry.get("launch")
         if (shortcuts or disabled) and isinstance(launch, list) and launch and all(isinstance(a, str) for a in launch):
             clean[str(app_id)] = {"name": str(entry.get("name", app_id))[:120], "launch": launch,
                                   "shortcuts": shortcuts, "disabled": disabled}
     return {"apps": clean}
+
+
+def launch_target_missing(launch):
+    """True when a shortcut's app is gone: its .desktop file, or an AppImage
+    deleted from a folder that is still there (not an unmounted drive)."""
+    if len(launch) != 1:
+        return False
+    path = Path(launch[0])
+    if not path.is_absolute() or path.exists():
+        return False
+    return path.suffix == ".desktop" or path.parent.is_dir()
+
+
+def prune_missing(state):
+    """Drop entries whose app was uninstalled. Returns the removed entries."""
+    removed = {k: v for k, v in state["apps"].items() if launch_target_missing(v["launch"])}
+    for key in removed:
+        del state["apps"][key]
+    return list(removed.values())
 
 
 def _atomic_write(path, text):
@@ -273,6 +367,13 @@ def app_launch_argv(app):
     return None
 
 
+def shortcut_launch(launch, action=""):
+    """argv for a shortcut: the app, or one of its desktop actions."""
+    if action and len(launch) == 1 and launch[0].endswith(".desktop"):
+        return [f"{launch[0]}:{action}"]
+    return list(launch)
+
+
 def app_key(app):
     return app.get("desktop_path") or app.get("desktop_id", "")
 
@@ -282,13 +383,20 @@ def app_key(app):
 class Bindings:
     """Snapshot of who owns which key combination right now."""
 
-    def __init__(self, state, live=None, user=None, defaults=None, main_mods=None):
+    def __init__(self, state, live=None, user=None, defaults=None, main_mods=None, default_apps=None):
         self.state = state
+        self._default_apps = dict(default_apps or {})
         self.live = read_live_binds() if live is None else live
         self.user_binds, self.user_unbinds = parse_user_binds() if user is None else user
         self.main_mods = main_mods
         self.default_binds = (parse_user_binds(omarchy_binding_files())[0]
                               if defaults is None else defaults)
+
+    def default_app(self, role):
+        """The user's default app for an Omarchy role, cached."""
+        if role not in self._default_apps:
+            self._default_apps[role] = default_app_id(role)
+        return self._default_apps[role]
 
     def _launcher_owner(self, combo, ids):
         mask = modmask(combo)
@@ -297,6 +405,13 @@ class Bindings:
                 if modmask(sc) == mask and sc["key"].casefold() in ids:
                     return app_id, entry
         return None, None
+
+    @staticmethod
+    def _launcher_action(entry, combo, ids):
+        for sc in entry["shortcuts"]:
+            if modmask(sc) == modmask(combo) and sc["key"].casefold() in ids:
+                return sc.get("action", "")
+        return ""
 
     def _user_bind(self, combo, ids):
         mask = modmask(combo)
@@ -311,14 +426,23 @@ class Bindings:
         return any(modmask(d) == mask and d["key"].casefold() in ids
                    for entry in self.state["apps"].values() for d in entry["disabled"])
 
-    def classify(self, combo, app_id, keycode=None):
-        """Return (level, description) for assigning combo to app_id."""
+    def classify(self, combo, app_id, keycode=None, app=None, action=""):
+        """Return (level, description) for assigning combo to app_id, opening
+        the app itself or, with `action`, one of its desktop actions."""
         ids = key_ids(combo, keycode)
         owner_id, owner = self._launcher_owner(combo, ids)
         if owner_id == app_id:
-            return SAME, owner["name"]
+            current = self._launcher_action(owner, combo, ids)
+            return (SAME, owner["name"]) if current == action else (RETARGET, current)
         if owner_id:
             return LAUNCHER, owner["name"]
+        if app is not None:
+            # Another binding already does exactly this: assigning would only duplicate it.
+            for bind in self.external_shortcuts(app):
+                if modmask(bind["combo"]) == modmask(combo) and bind["combo"]["key"].casefold() in ids:
+                    if bind["action"] == action:
+                        return SAME, bind["description"]
+                    break
         mask = modmask(combo)
         live = [b for b in self.live if b["mask"] == mask and b["key"] in ids]
         user = self._user_bind(combo, ids)
@@ -388,25 +512,69 @@ class Bindings:
         # org.gnome.Nautilus -> nautilus, the name omarchy-launch-* uses.
         short_id = desktop_id.casefold().removesuffix(".desktop").rsplit(".", 1)[-1]
 
+        app_ids = {desktop_id.casefold().removesuffix(".desktop"), program, short_id} - {""}
+
+        def action_args(action):
+            try:
+                argv = shlex.split(action.get("exec", ""))
+            except ValueError:
+                return []
+            return [a.casefold() for a in argv[1:] if not a.startswith("%")]
+
+        def action_from(words):
+            """The action whose extra arguments (e.g. --incognito) the command
+            carries; "" for the app itself."""
+            best, best_args = "", 0
+            for action in app.get("actions", []):
+                extra = action_args(action)
+                if extra and all(a in words for a in extra) and len(extra) > best_args:
+                    best, best_args = action["id"], len(extra)
+            return best
+
         def launches_app(bind):
+            """None when bind does not open this app, else the action id it
+            opens ("" for the app itself)."""
             command = bind["command"].casefold()
             webapp = _WEBAPP_RE.search(bind["command"])
             if webapp:
-                return (_normalize_url(webapp.group(1)) in urls
-                        or (is_web_app and name and name == bind["description"].casefold()))
+                hit = (_normalize_url(webapp.group(1)) in urls
+                       or (is_web_app and name and name == bind["description"].casefold()))
+                return "" if hit else None
             omarchy = _OMARCHY_RE.search(bind["command"])
             if omarchy:
-                target = omarchy.group(1).casefold()
-                return target in {program, short_id} - {""}
+                base, *args = omarchy.group(1).casefold().split()
+                if base in DEFAULT_APP_ROLES:
+                    default = self.default_app(base).casefold()
+                    # Terminal and browser resolve to a desktop id, so web apps and
+                    # terminal apps running on them do not match; the editor is a program.
+                    own = {program} if base == "editor" else {desktop_id.casefold().removesuffix(".desktop")}
+                    if not default or default not in own:
+                        return None
+                    if not args:
+                        return ""
+                    return private_action(app) if args == ["--private"] else None
+                return "" if not args and base in app_ids else None
+            tui = _TUI_RE.search(bind["command"])
+            if tui:
+                try:
+                    target = Path(shlex.split(tui.group(1))[0]).name.casefold()
+                except (ValueError, IndexError):
+                    return None
+                return "" if target in app_ids else None
             words = set(re.findall(r"[\w.\-]+", command))
             if not ("launch" in command or "exec" in command or "gtk-launch" in command):
-                return False
-            return any(n in words or n + ".desktop" in words for n in needles) or (
+                return None
+            hit = any(n in words or n + ".desktop" in words for n in needles) or (
                 program and program not in {"env", "sh", "bash", "flatpak", "gtk-launch", "python3",
                                             "omarchy-launch-webapp"}
                 and program in words)
+            return action_from(words) if hit else None
 
-        result = [bind for bind in self.user_binds if launches_app(bind)]
+        result = []
+        for bind in self.user_binds:
+            action = launches_app(bind)
+            if action is not None:
+                result.append({**bind, "action": action})
         user_ids = {combo_id(b["combo"]) for b in self.user_binds} | self.user_unbinds
         for bind in self.default_binds:
             cid = combo_id(bind["combo"])
@@ -416,8 +584,9 @@ class Bindings:
                     (b["mask"], b["key"]) == cid and b["description"] == bind["description"]
                     for b in self.live):
                 continue
-            if launches_app(bind):
-                result.append({**bind, "file": "Omarchy"})
+            action = launches_app(bind)
+            if action is not None:
+                result.append({**bind, "file": "Omarchy", "action": action})
         return result
 
 
@@ -457,10 +626,11 @@ def render_lua(state):
             note = f" (was: {combo['description']})" if combo.get("description") else ""
             lines.append(lua_comment(f"{entry['name']}: disabled{note}"))
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
-        command = " ".join(shlex.quote(a) for a in entry["launch"])
         for combo in entry["shortcuts"]:
+            command = " ".join(shlex.quote(a) for a in shortcut_launch(entry["launch"], combo.get("action", "")))
+            what = f"{entry['name']}: {combo['action']}" if combo.get("action") else entry["name"]
             note = f" (replaces: {combo['replaces']})" if combo.get("replaces") else ""
-            lines.append(lua_comment(f"{entry['name']}{note}"))
+            lines.append(lua_comment(f"{what}{note}"))
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
             lines.append(f"o.bind({lua_string(combo_string(combo))}, {lua_string(entry['name'])}, "
                          f"{{ launch = {lua_string(command)} }})")
