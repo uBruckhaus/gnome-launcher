@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.3.4`
+- **Version**: `1.3.5`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 1.3.5 — tidier shortcut editor.** The shortcut page has no visible scrollbar, uses the same edge gaps as the app list, and the Assign button sits beside the key being defined instead of below all keys.
 
 **New in 1.3.4 — predictable shortcut modifiers.** Adding a shortcut always starts from your default modifiers (Super + Shift unless you changed the default), also for apps that already have a shortcut.
 

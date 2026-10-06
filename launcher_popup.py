@@ -1112,10 +1112,11 @@ class Launcher(Gtk.Application):
 
     def build_shortcut_page(self):
         page = Gtk.ScrolledWindow()
-        page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_start(2)
-        box.set_margin_end(2)
+        # Same 8px inset as the app rows, so both pages share their edge gaps.
+        box.set_margin_start(8)
+        box.set_margin_end(8)
         page.set_child(box)
 
         def section(text):
@@ -1178,7 +1179,16 @@ class Launcher(Gtk.Application):
         key_box.add_css_class("sc-key")
         key_box.set_halign(Gtk.Align.FILL)
         key_box.set_tooltip_text("Press a key now. Hold modifiers while pressing, or toggle them above.")
-        box.append(key_box)
+        key_box.set_hexpand(True)
+        # Assign sits beside the key it applies, to save a row.
+        key_row = Gtk.Box(spacing=8)
+        key_row.append(key_box)
+        apply = Gtk.Button(label="Assign")
+        apply.add_css_class("sc-primary")
+        apply.set_valign(Gtk.Align.CENTER)
+        apply.connect("clicked", lambda *_: self.apply_shortcut())
+        key_row.append(apply)
+        box.append(key_row)
 
         status = Gtk.Label(xalign=0, wrap=True)
         status.add_css_class("sc-status")
@@ -1219,13 +1229,6 @@ class Launcher(Gtk.Application):
             others.append(button)
             other_buttons[key] = button
         box.append(others)
-
-        apply = Gtk.Button(label="Assign")
-        apply.add_css_class("sc-primary")
-        apply.set_halign(Gtk.Align.END)
-        apply.set_margin_top(4)
-        apply.connect("clicked", lambda *_: self.apply_shortcut())
-        box.append(apply)
 
         self.stack.add_named(page, "shortcut")
         self.sc_page, self.sc_current, self.sc_current_title = page, current, current_title
