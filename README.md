@@ -14,6 +14,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 
+## Changes in 1.3.4
+
+Adding a shortcut always starts from the default modifiers (Super + Shift unless changed with **Default for apps without a shortcut**), also for apps that already have one, and after cancelling a change.
+
 ## Changes in 1.3.3
 
 The app list no longer shows a scrollbar; wheel, touchpad and keyboard scrolling still work. The app-menu buttons and the show/hide hidden-apps button now share one column, with the same gap to the right edge as the app icons have to the left.

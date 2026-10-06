@@ -1273,12 +1273,10 @@ class Launcher(Gtk.Application):
         self.sc_target_row.set_visible(len(self.sc_target_ids) > 1)
         self.sync_change_mode()
         self.render_shortcut_current()
-        # Start from the modifiers the app already uses (e.g. Super + Shift for
-        # Brave), else the user's default (Super + Shift unless changed). The key stays open ("?") until the
-        # user presses one or picks a free key, so Assign starts disabled.
-        existing = self.active_app_shortcuts()
-        mods = existing[0]["mods"] if existing else shortcuts.load_default_mods()
-        self.set_shortcut_combo(mods, None, None)
+        # A new shortcut always starts from the default modifiers (Super + Shift
+        # unless changed). The key stays open ("?") until the user presses one
+        # or picks a free key, so Assign starts disabled.
+        self.set_shortcut_combo(shortcuts.load_default_mods(), None, None)
         self.back_button.set_visible(True)
         self.hidden_button.set_visible(False)
         self.stack.set_visible_child_name("shortcut")
@@ -1460,7 +1458,7 @@ class Launcher(Gtk.Application):
         self.sc_editing = None
         self.sync_change_mode()
         self.render_shortcut_current()
-        self.set_shortcut_combo(self.selected_shortcut_mods(), None, None)
+        self.set_shortcut_combo(shortcuts.load_default_mods(), None, None)
 
     def sync_change_mode(self):
         if self.sc_editing:
