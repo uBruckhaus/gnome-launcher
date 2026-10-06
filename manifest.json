@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "Simple Launcher",
-  "version": "1.3.2",
+  "version": "1.3.3",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Fast, theme-aware app launcher for Omarchy with an advanced shortcut editor: bind keys to apps or their actions (e.g. New Incognito Window), see who owns every key and rebind any of them in one click.",

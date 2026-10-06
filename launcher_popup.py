@@ -217,6 +217,7 @@ class Launcher(Gtk.Application):
         hidden_button = Gtk.Button(icon_name="view-reveal-symbolic")
         hidden_button.set_tooltip_text("Show hidden apps")
         hidden_button.add_css_class("flat")
+        hidden_button.add_css_class("launcher-header-btn")
         hidden_button.connect("clicked", self.toggle_hidden)
         header.append(hidden_button)
         card.append(header)
@@ -225,9 +226,8 @@ class Launcher(Gtk.Application):
         scroller.set_size_request(420, 50)
         scroller.set_max_content_height(590)
         scroller.set_propagate_natural_height(True)
-        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        # Reserve a separate scrollbar gutter so it cannot cover app actions.
-        scroller.set_overlay_scrolling(False)
+        # EXTERNAL keeps wheel/touchpad/keyboard scrolling but hides the scrollbar.
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         stack.set_transition_duration(140)
@@ -238,7 +238,6 @@ class Launcher(Gtk.Application):
         rows = Gtk.ListBox()
         rows.set_selection_mode(Gtk.SelectionMode.SINGLE)
         rows.add_css_class("launcher-list")
-        rows.set_margin_end(10)
         rows.connect("row-activated", self.activate_row)
         scroller.set_child(rows)
 
@@ -302,7 +301,10 @@ class Launcher(Gtk.Application):
             border: 1px solid {colors['accent']}; border-radius: {radius}px; padding: 17px; }}
         .launcher-title {{ font-size: 15px; font-weight: 600; }}
         .launcher-list {{ background: transparent; }}
-        .launcher-list row {{ border-radius: {radius}px; padding: 6px 8px; min-height: 44px; }}
+        .launcher-list row {{ border-radius: {radius}px; padding: 6px 4px 6px 8px; min-height: 44px; }}
+        /* Header eye button and row menu buttons share one column, 8px in from
+           the card edge like the app icons on the left (4px margin/padding + 4px button padding). */
+        .launcher-card button.launcher-header-btn {{ padding: 4px; min-width: 0; min-height: 0; margin-right: 4px; }}
         .launcher-list row:selected {{ background: {sel_hex}; }}
         .launcher-card label, .launcher-card button {{ color: {colors['foreground']}; }}
         .launcher-app-name {{ font-size: 13px; font-weight: 600; }}
@@ -316,6 +318,8 @@ class Launcher(Gtk.Application):
             box-shadow: none;
             border-radius: {radius}px;
             padding: 4px;
+            min-width: 0;
+            min-height: 0;
         }}
         .launcher-list row > box > button.flat:hover {{
             background: rgba(255, 255, 255, 0.1);

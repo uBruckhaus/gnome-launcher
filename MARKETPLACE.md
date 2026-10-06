@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.3.2`
+- **Version**: `1.3.3`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -30,7 +30,9 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
 
-**New in 1.3.2 — reliable app menus.** The scrollbar has its own gutter and space beside the app-actions button. App menus stay open during running-status updates and app-directory changes, temporary focus loss does not dismiss the launcher while a menu is open, and Escape dismisses the menu first.
+**New in 1.3.3 — cleaner list.** The app list has no visible scrollbar (wheel, touchpad and keyboard scrolling still work), and the app-menu buttons line up with the show/hidden-apps button at the same edge gap as the app icons on the left.
+
+**New in 1.3.2 — reliable app menus.** App menus stay open during running-status updates and app-directory changes, temporary focus loss does not dismiss the launcher while a menu is open, and Escape dismisses the menu first.
 
 **New in 1.3 — advanced shortcuts.** A shortcut can now open an app *or one of its actions*: give Brave's **New Incognito Window** its own key, and the app menu shows it next to the action. The shortcut editor shows every key with its owner — green when free, yellow when one of your bindings has it, orange for an Omarchy default — and taking over a key is a single **Rebind** click; remove the shortcut and the original binding works again. Omarchy's terminal, browser and editor defaults show on your actual default apps, keys like Enter and Space can be bound, duplicates are prevented, and apps with several shortcuts get a `+1` badge. The app list updates live when apps are installed or removed, shortcuts of uninstalled apps are cleaned up, **Uninstall…** works the Omarchy way, and the launcher reloads itself after plugin updates.
 
