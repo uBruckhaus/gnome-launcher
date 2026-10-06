@@ -50,7 +50,7 @@ Desktop entries launch through `uwsm-app` or Gio using the original desktop file
 
 ## Installation
 
-Requires Python with PyGObject, GTK4, and the GTK4 Layer Shell library and typelib, plus an Omarchy/Hyprland Wayland session. GTK4 Layer Shell must be installed separately; the plugin command does not install it. Optional `7z` support extracts AppImage metadata and icons.
+Requires Python with PyGObject, GTK4 and GTK4 Layer Shell, plus an Omarchy/Hyprland Wayland session. All of these come with a standard Omarchy install, so no manual setup is needed. Optional `7z` support extracts AppImage metadata and icons.
 
 The **Uninstall…** action calls Omarchy's existing launcher-entry removal command only after confirmation; that command can invoke package management and request privileges in a terminal. The plugin adds no automatic installer or background package-management action.
 
