@@ -14,6 +14,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 
+## Changes in 1.3.2
+
+The app list reserves space between the scrollbar and app-actions buttons. Open app menus survive background running-status updates, app-directory refreshes, and temporary focus loss. Escape closes the app menu before clearing search or dismissing the launcher.
+
 ## Features
 
 - **Omarchy Bar Widget**: Sits natively in the Quickshell top bar as an app-grid button. Click to toggle the launcher on and off.
@@ -33,6 +37,10 @@ Standalone AppImage metadata is limited to 64 KiB. Icons are extracted through a
 Desktop entries launch through `uwsm-app` or Gio using the original desktop file. If native launching fails, the launcher reports failure; it never executes the entry’s `Exec` text through a shell.
 
 ## Installation
+
+Requires Python with PyGObject, GTK4, and the GTK4 Layer Shell library and typelib, plus an Omarchy/Hyprland Wayland session. GTK4 Layer Shell must be installed separately; the plugin command does not install it. Optional `7z` support extracts AppImage metadata and icons.
+
+The **Uninstall…** action calls Omarchy's existing launcher-entry removal command only after confirmation; that command can invoke package management and request privileges in a terminal. The plugin adds no automatic installer or background package-management action.
 
 Install using the Omarchy plugin manager:
 

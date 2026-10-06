@@ -145,6 +145,7 @@ class Launcher(Gtk.Application):
         self.list_bindings = None  # Snapshot for the list chips, refreshed on open.
         self.shortcut_app = None
         self.shortcut_bindings = None
+        self.actions_popover = None
         self.code_stamp = code_stamp()
         self.app_monitors = []
         self.apps_changed_source = 0
@@ -225,6 +226,8 @@ class Launcher(Gtk.Application):
         scroller.set_max_content_height(590)
         scroller.set_propagate_natural_height(True)
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        # Reserve a separate scrollbar gutter so it cannot cover app actions.
+        scroller.set_overlay_scrolling(False)
         stack = Gtk.Stack()
         stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
         stack.set_transition_duration(140)
@@ -235,6 +238,7 @@ class Launcher(Gtk.Application):
         rows = Gtk.ListBox()
         rows.set_selection_mode(Gtk.SelectionMode.SINGLE)
         rows.add_css_class("launcher-list")
+        rows.set_margin_end(10)
         rows.connect("row-activated", self.activate_row)
         scroller.set_child(rows)
 
@@ -561,6 +565,8 @@ class Launcher(Gtk.Application):
         GLib.idle_add(_focus)
 
     def hide(self):
+        if self.actions_menu_open():
+            self.actions_popover.popdown()
         if self.shortcut_app is not None:
             self.close_shortcut_page(focus_list=False)
         if self.window and self.window.get_visible():
@@ -604,6 +610,9 @@ class Launcher(Gtk.Application):
         self.apps_changed_source = 0
         if not (self.window and self.window.get_visible()) or self.shortcut_app is not None:
             return GLib.SOURCE_REMOVE  # Picked up on the next open.
+        if self.actions_menu_open():
+            self.apps_changed_source = GLib.timeout_add(700, self.reload_apps)
+            return GLib.SOURCE_REMOVE
         row = self.rows.get_selected_row()
         selected = row.app["desktop_id"] if row is not None and hasattr(row, "app") else None
         try:
@@ -646,6 +655,8 @@ class Launcher(Gtk.Application):
             GLib.timeout_add(100, self.hide_if_inactive)
 
     def hide_if_inactive(self):
+        if self.actions_menu_open():
+            return GLib.SOURCE_REMOVE
         if self.window and self.window.get_visible() and not self.window.is_active():
             self.hide()
         return GLib.SOURCE_REMOVE
@@ -657,6 +668,9 @@ class Launcher(Gtk.Application):
 
     def on_key(self, _controller, key, _code, state):
         if key == Gdk.KEY_Escape:
+            if self.actions_menu_open():
+                self.actions_popover.popdown()
+                return True
             if self.search_query:
                 self.search_query = ""
                 self.refresh_list()
@@ -751,7 +765,8 @@ class Launcher(Gtk.Application):
 
     def poll(self):
         if self.window and self.window.is_visible():
-            if self.refresh_running():
+            # Replacing a row also destroys its anchored actions menu.
+            if not self.actions_menu_open() and self.refresh_running():
                 self.refresh_list()
             if self.theme.reload():
                 self.apply_theme()
@@ -954,10 +969,27 @@ class Launcher(Gtk.Application):
         launch_app(row.app)
         self.hide()
 
+    def actions_menu_open(self):
+        return self.actions_popover is not None and self.actions_popover.get_visible()
+
+    def on_actions_closed(self, popover):
+        if self.actions_popover is popover:
+            self.actions_popover = None
+        # Release the popup after GTK finishes dispatching the closing click.
+        def cleanup():
+            if popover.get_parent() is not None:
+                popover.unparent()
+            return GLib.SOURCE_REMOVE
+        GLib.idle_add(cleanup)
+
     def show_actions(self, button, app):
+        if self.actions_menu_open():
+            self.actions_popover.popdown()
         popover = Gtk.Popover()
         popover.add_css_class("launcher-popover")
         popover.set_parent(button)
+        self.actions_popover = popover
+        popover.connect("closed", self.on_actions_closed)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_start(4)
         box.set_margin_end(4)
@@ -969,8 +1001,6 @@ class Launcher(Gtk.Application):
         def chip_for(action_id):
             combo = next((c for c in assigned if c["action"] == action_id), None)
             return shortcuts.combo_label(combo).replace(" + ", "+") if combo else None
-
-        self.actions_popover = popover
 
         def add_action(label, callback, icon_name=None, is_destructive=False, shortcut=None, keep_open=False,
                        css=None):
