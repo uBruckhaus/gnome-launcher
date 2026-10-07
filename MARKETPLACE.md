@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.3.6`
+- **Version**: `1.4.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -20,7 +20,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 🏷️ Short Description (Tagline)
 
-> Fast, theme-aware app launcher for Omarchy with an advanced shortcut editor: bind keys to apps or their actions, see who owns every key, and rebind any of them in one click.
+> Fast, theme-aware launcher for Omarchy apps, widgets, plugins and tray apps, with an advanced shortcut editor: bind keys or two-step sequences to apps, their actions or tray menu entries, see who owns every key, and rebind any of them in one click.
 
 ---
 
@@ -29,6 +29,16 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 1.4 — widgets, plugins and tray apps, two-step shortcuts.**
+
+- **Widgets & Plugins list**: a puzzle-piece button (or `Tab`) switches to a second list with every Omarchy shell widget and plugin that can be opened (Audio, Bluetooth, Clipboard, Emojis, Weather, Omamail, …), with its own show-hidden toggle and the same menu as apps: **Open**, **Shortcut…**, **Hide from list**. New plugins appear live, like new apps.
+- **Running tray apps first**: Steam, NordVPN, LM Studio and other apps with a bar tray icon are listed under **Running in the bar**, with their app icon. Their menu is the icon's own tray menu (submenus, checkmarks, the app's Quit pinned at the bottom), and any entry can get a shortcut, e.g. Steam › Library. Electron icons (LM Studio, Antigravity) are named after their app.
+- **Uninstall plugins**: installed plugins have **Uninstall…** like apps (via `omarchy plugin remove`); the confirmation warns when a git checkout holds changed files or unpushed commits.
+- **Quit background apps**: apps running in the tray or background get **Quit** next to **Close**, using the app's own tray Quit for a clean exit.
+- **Two-step shortcuts**: `Super + Alt + Space`, then `N`. Several shortcuts can share the first step; the letters show which second keys are free. Built on a Hyprland submap; any other key cancels.
+- **Just press the keys**: while the shortcut page is open, every combo reaches it — even ones Omarchy already uses — and a combo followed quickly by a single key becomes a two-step shortcut. Clicking a picked key again clears it.
+- **Keys for the launcher itself**: Simple Launcher is in the widget list, with **Show apps** and **Show widgets & plugins** — give each list its own key.
 
 **New in 1.3.5 — tidier shortcut editor.** The shortcut page has no visible scrollbar, uses the same edge gaps as the app list, and the Assign button sits beside the key being defined instead of below all keys.
 
@@ -60,6 +70,8 @@ New in 1.1: give any app its own global Hyprland shortcut straight from the laun
   - **Every key, coloured by owner (new in 1.3)**: all letters and keys like Enter, Space or Backspace, green when free, yellow for your bindings, orange for Omarchy defaults; hover names the owner.
   - **One-click rebinding (new in 1.3)**: taken keys are an option, not an error — **Rebind** turns the old binding off while your shortcut exists.
   - **Non-destructive**: Your config files are never edited. Shortcuts live in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`; overriding or turning off a binding is an `hl.unbind` there, so removing the shortcut brings the original back. Every change is checked with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+- 🧩 **Widgets, Plugins & Tray Apps (new in 1.4)**: A second list for Omarchy shell widgets and plugins and the apps running in the bar tray, each with open, shortcut, hide, uninstall and quit — the same way as apps.
+- ⏭️ **Two-Step Shortcuts (new in 1.4)**: Sequences like `Super + Alt + Space`, then `N`; just press them on the shortcut page.
 - 🔄 **Always Current (new in 1.3)**: The app list refreshes live when apps are installed or removed; shortcuts of uninstalled apps are dropped so their keys work again; after a plugin update the launcher restarts itself on the next open.
 - 🗑️ **Uninstall (new in 1.3)**: The last item of the app menu asks “Do you want to uninstall …?” and hands over to Omarchy's own `omarchy-remove-launcher-entry`.
 - 🪶 **Lightweight & Self-Contained**: Runs on standard system Python, GIO, and GTK4. Zero heavy virtual environments, background node daemons, or bloated runtime dependencies.
@@ -80,6 +92,7 @@ New in 1.1: give any app its own global Hyprland shortcut straight from the laun
 | **Right Arrow** | Open context actions menu (for apps declaring desktop actions) |
 | **Delete** | Close active running window of the selected application |
 | **Ctrl + K** | Manage the global shortcut of the selected application |
+| **Tab** | Switch between the app list and the widget & plugin list |
 | **Click outside** | Instantly dismiss launcher |
 
 ---

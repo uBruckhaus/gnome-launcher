@@ -4,6 +4,8 @@ Fast, theme-aware application launcher popup and bar widget for [Omarchy](https:
 
 ![Simple Launcher](preview.png)
 
+**New in 1.4:** a second list for Omarchy **widgets, plugins and running tray apps** (Steam, NordVPN, LM Studio, …) with their own menus and shortcuts, **Uninstall** for marketplace plugins, **Quit** for background apps, **two-step shortcuts** (`Super + Alt + Space`, then `N`), keys captured just by pressing them, and separate keys for the app list and the widget list.
+
 ## Advanced shortcuts
 
 Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
@@ -13,6 +15,26 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **One-click rebinding**: taking over a key is an option, not an error. **Rebind** turns the old binding off while your shortcut exists; remove the shortcut and the original works again.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
+## Changes in 1.4.0
+
+A second list for Omarchy shell **widgets & plugins** (Audio, Bluetooth, Clipboard, Emojis, Weather, Omamail, …). The puzzle-piece button next to the eye switches between apps and widgets (or press `Tab`); the grid button switches back. The widget list has its own show-hidden toggle, and its `☰` menu works like the app menu: **Open**, **Shortcut…** (`Ctrl+K`) and **Hide from list**. A widget shortcut toggles it like Omarchy's own `Super + Ctrl + V` does for the clipboard, and Omarchy defaults like that one show up on the shortcut page. Only plugins the shell can open are listed; bar widgets that just run a command when clicked are left out. Hidden widgets are saved in `~/.config/applauncher/hidden-plugins.json`.
+
+Running **tray icons** (Steam, NordVPN, LM Studio, Antigravity, …) are listed first in the same list, under **Running in the bar** (apps like Steam stay in the app list too). Electron apps share a generic tray Id, so their icons are told apart by title. Icons without a primary action of their own (Steam) open their app instead. Their `☰` menu is the icon's own tray menu, submenus included (NordVPN's country list scrolls, **Back** goes up a level), with checkmarks for toggles. Enter or a click opens the app (Steam's window); icons that are only a menu, like NordVPN, open their menu instead. **Shortcut…** can bind the icon or any entry of its menu, e.g. `Super + Alt + L` → Steam › Library; the shortcut runs `tray.py <id> <entry>`, which finds the icon again after the app restarts. An entry whose label changes (NordVPN's *Secure my connection* while connected) only works while it carries that label.
+
+Apps that run in the background or in the tray get **Quit** in their app menu (next to **Close**, which only closes windows): it uses the app's own tray entry (*Quit LM Studio*, *Exit Steam*) for a clean exit, or ends the process of a windowless background app. In a tray icon's own menu its Quit entry stays pinned below long lists.
+
+Installed plugins — from the marketplace, `omarchy plugin add` or linked — have **Uninstall…** in their menu, like apps; Omarchy's built-in ones do not. It runs `omarchy plugin remove`, which disables the plugin, unloads it and removes its folder (plain folders are kept as a backup, links are only unlinked). Git checkouts are deleted, so the confirmation says when that would lose work: changed files, unpushed commits, or a repo without upstream. Launcher shortcuts of a removed plugin are dropped. A tray icon's **Uninstall…** uninstalls its app (Steam).
+
+New plugins show up in the open list on their own, like newly installed apps: the launcher watches `~/.config/omarchy/plugins` and the shell's `shell.json`, and tray icons appear and disappear as their apps start and quit.
+
+**Just press the keys**: while the shortcut page is open, the launcher switches Hyprland to an empty submap, so every combo reaches the page — even ones Hyprland or Omarchy already use (e.g. `Super + Alt + Space`, the Apps menu) — instead of running. Leaving the page switches back; `Super + Escape` does too, should the launcher ever fail to. Press a combo, then within about a second a key on its own, and it becomes a two-step shortcut automatically.
+
+**Two-step shortcuts**: tick **Two steps** on the shortcut page, choose the first combo (e.g. `Super + Alt + Space`), then the second key on its own (e.g. `N`) — press it or click a letter; a second click clears it, like every key button. Several shortcuts can share a first combo, each with its own second key; the letters show which second keys are free. The first combo enters a Hyprland submap where the second key runs the shortcut and any other key cancels. A first combo cannot open anything by itself, so it conflicts with one-step shortcuts on the same keys (shown and rebindable like any other conflict).
+
+**Simple Launcher** itself is in the widget list too: Enter or **Shortcut…** opens its shortcut page, so the keys that open the launcher are set the same way as any app's.
+
+Its `☰` menu has **Show apps** and **Show widgets & plugins**, and on the shortcut page **Opens** offers the same choice, so each list can get its own key (e.g. `Super + Alt + A` for apps, `Super + Alt + W` for widgets). Such a key opens the launcher on that list, switches an open launcher over to it, and closes it when that list is already showing. By hand: `launcher-toggle apps` or `launcher-toggle plugins`.
 
 ## Changes in 1.3.5
 
@@ -70,11 +92,15 @@ Or install locally:
 
 ## Keybindings (Optional)
 
-To bind Simple Launcher to a global shortcut (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
+The easiest way: switch to **Widgets & Plugins** (`Tab`), select **Simple Launcher** and press Enter (or `☰` → **Shortcut…**). Assign one or more keys there; a binding you already wrote by hand shows up too and can be changed or turned off like any other.
+
+To bind it by hand instead (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER, SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
+
+`launcher-toggle apps` and `launcher-toggle plugins` open a specific list.
 
 Or for `SUPER + CTRL + ALT + SPACE`:
 
@@ -111,6 +137,7 @@ Shortcuts are stored in `~/.config/applauncher/shortcuts.json` and written to `~
 | `Right Arrow` | Open context actions menu (for apps with desktop actions) |
 | `Delete` | Close active instance of the selected app |
 | `Ctrl+K` | Manage the global shortcut of the selected app |
+| `Tab` | Switch between the app list and the widget & plugin list |
 | `Click outside` | Dismiss launcher popup |
 
 ## Removal
@@ -121,7 +148,7 @@ To remove the plugin:
 omarchy plugin remove ubruckhaus.simple-launcher-for-fools
 ```
 
-Hidden apps configuration is saved in `~/.config/applauncher/hidden.json` and will persist across updates.
+Hidden apps configuration is saved in `~/.config/applauncher/hidden.json` (hidden widgets in `hidden-plugins.json`) and will persist across updates.
 
 ## License
 

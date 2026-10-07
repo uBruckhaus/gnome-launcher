@@ -107,7 +107,36 @@ is_launcher_process() {
     return 0
 }
 
+# Whether the process handles a signal (by number). An instance started before
+# an update may not know the per-list signals, and would be killed by them.
+catches_signal() {
+    local pid="$1" num="$2" mask
+    mask="$(awk '/^SigCgt:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+    [[ "$mask" =~ ^[0-9a-fA-F]+$ ]] || return 1
+    (( (16#$mask >> (num - 1)) & 1 ))
+}
+
+# Signal the launcher, falling back to a plain toggle for an older instance.
+signal_launcher() {
+    local pid="$1" sig="$2" num
+    num="$(kill -l "$sig" 2>/dev/null || true)"
+    if [[ "$sig" != "USR1" ]] && ! { [[ -n "$num" ]] && catches_signal "$pid" "$num"; }; then
+        sig="USR1"
+    fi
+    kill -s "$sig" "$pid" 2>/dev/null || true
+}
+
 main() {
+    # Optional list to show: `launcher-toggle apps` or `launcher-toggle plugins`.
+    # Each has its own signal, so each can have its own shortcut.
+    local mode="${1:-}" sig="USR1"
+    case "$mode" in
+        "") ;;
+        apps) sig="USR2" ;;
+        plugins) sig="RTMIN+1" ;;
+        *) echo "usage: launcher-toggle [apps|plugins]" >&2; exit 2 ;;
+    esac
+
     local pid_file
     pid_file="$(resolve_pid_file)"
 
@@ -116,7 +145,7 @@ main() {
         local rec_pid rec_st
         IFS=":" read -r rec_pid rec_st _ < "$pid_file" || true
         if is_launcher_process "$rec_pid" "$rec_st"; then
-            kill -USR1 "$rec_pid" 2>/dev/null || true
+            signal_launcher "$rec_pid" "$sig"
             exit 0
         fi
         # Stale PID file or PID was reused by another program; remove safely
@@ -128,7 +157,7 @@ main() {
     while IFS= read -r p; do
         [[ -n "$p" && "$p" != "$$" ]] || continue
         if is_launcher_process "$p"; then
-            kill -USR1 "$p" 2>/dev/null || true
+            signal_launcher "$p" "$sig"
             st="$(get_proc_starttime "$p")"
             [[ -n "$pid_file" ]] && echo "${p}:${st}" > "$pid_file"
             exit 0
@@ -136,7 +165,7 @@ main() {
     done < <(pgrep -u "$USER_ID" -f "${CANONICAL_SCRIPT}" 2>/dev/null || true)
 
     # Not running: start launcher popup in background
-    "$PYTHON_BIN" "${CANONICAL_SCRIPT}" >/dev/null 2>&1 &
+    SIMPLE_LAUNCHER_MODE="$mode" "$PYTHON_BIN" "${CANONICAL_SCRIPT}" >/dev/null 2>&1 &
     local child_pid=$!
     st="$(get_proc_starttime "$child_pid")"
     [[ -n "$pid_file" ]] && echo "${child_pid}:${st}" > "$pid_file"

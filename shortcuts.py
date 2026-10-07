@@ -48,19 +48,57 @@ _OMARCHY_RE = re.compile(r'\bomarchy\s*=\s*"([^"]+)"')
 _TUI_RE = re.compile(r'\btui\s*=\s*"([^"]+)"')
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _URL_RE = re.compile(r'https?://[^\s"\']+')
+_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 # --- combos ------------------------------------------------------------------
 
-def make_combo(mods, key):
-    """Return a canonical combo dict, or None when the key name is unusable."""
+def _clean_key(key):
     key = str(key or "").strip()
     if not _KEY_RE.match(key):
         return None
+    return key.upper() if len(key) == 1 and key.isalpha() else key
+
+
+def make_combo(mods, key, then=None):
+    """Return a canonical combo dict, or None when a key name is unusable.
+
+    With `then`, it is a two-step shortcut: press mods + key, release, then
+    press `then` on its own (e.g. Super + Alt + Space, N)."""
+    key = _clean_key(key)
+    if key is None:
+        return None
     mods = {m for m in mods if m in MOD_BITS}
-    if len(key) == 1 and key.isalpha():
-        key = key.upper()
-    return {"mods": [m for m in MOD_ORDER if m in mods], "key": key}
+    combo = {"mods": [m for m in MOD_ORDER if m in mods], "key": key}
+    if then:
+        then = _clean_key(then)
+        if then is None:
+            return None
+        combo["then"] = then
+    return combo
+
+
+def leader(combo):
+    """The first step of a combo (the combo itself when it has one step)."""
+    return {"mods": list(combo["mods"]), "key": combo["key"]}
+
+
+def collides(a, b):
+    """Whether two launcher shortcuts cannot both exist: the same keys, or one
+    step that is the first step of a two-step shortcut."""
+    if combo_id(a) == combo_id(b):
+        return True
+    return bool(a.get("then")) != bool(b.get("then")) and combo_id(leader(a)) == combo_id(leader(b))
+
+
+def owned_ids(state):
+    """Every key the launcher binds: its shortcuts and two-step first steps."""
+    ids = set()
+    for entry in state["apps"].values():
+        for combo in entry["shortcuts"]:
+            ids.add(combo_id(combo))
+            ids.add(combo_id(leader(combo)))
+    return ids
 
 
 def parse_combo(text):
@@ -82,14 +120,17 @@ def combo_string(combo):
     return " + ".join([*combo["mods"], combo["key"]])
 
 
-def combo_label(combo):
-    """Human syntax: "Super + Alt + F"."""
-    key = combo["key"]
+def key_label(key):
     pretty = {"RETURN": "Enter", "SPACE": "Space", "ESCAPE": "Esc", "BACKSPACE": "Backspace",
               "TAB": "Tab", "COMMA": ",", "PERIOD": ".", "SLASH": "/", "MINUS": "-",
               "EQUAL": "=", "SEMICOLON": ";", "APOSTROPHE": "'", "GRAVE": "`"}
-    key = pretty.get(key.upper(), key if len(key) > 1 else key.upper())
-    return " + ".join([*(MOD_LABELS[m] for m in combo["mods"]), key])
+    return pretty.get(key.upper(), key if len(key) > 1 else key.upper())
+
+
+def combo_label(combo):
+    """Human syntax: "Super + Alt + F", two-step "Super + Alt + Space, N"."""
+    label = " + ".join([*(MOD_LABELS[m] for m in combo["mods"]), key_label(combo["key"])])
+    return f"{label}, {key_label(combo['then'])}" if combo.get("then") else label
 
 
 def modmask(combo):
@@ -106,7 +147,7 @@ def key_ids(combo, keycode=None):
 
 
 def combo_id(combo):
-    return (modmask(combo), combo["key"].casefold())
+    return (modmask(combo), combo["key"].casefold(), (combo.get("then") or "").casefold())
 
 
 # --- reading existing bindings ---------------------------------------------
@@ -307,7 +348,8 @@ def load_state():
             continue
         shortcuts = []
         for item in entry.get("shortcuts", []):
-            combo = make_combo(item.get("mods", []), item.get("key", "")) if isinstance(item, dict) else None
+            combo = make_combo(item.get("mods", []), item.get("key", ""),
+                               item.get("then")) if isinstance(item, dict) else None
             if combo:
                 combo["replaces"] = str(item.get("replaces", ""))[:120]
                 action = str(item.get("action", ""))
@@ -327,9 +369,28 @@ def load_state():
     return {"apps": clean}
 
 
+def plugin_installed(plugin_id):
+    """Whether a shell plugin with this id is installed (yours or built in)."""
+    omarchy = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
+    for root in (Path.home() / ".config/omarchy/plugins", omarchy / "shell/plugins"):
+        if (root / plugin_id).exists():
+            return True
+        for manifest in [*root.glob("*/manifest.json"), *root.glob("*/*/manifest.json")]:
+            try:
+                if json.loads(manifest.read_text()).get("id") == plugin_id:
+                    return True
+            except (OSError, ValueError, AttributeError):
+                continue
+    return False
+
+
 def launch_target_missing(launch):
-    """True when a shortcut's app is gone: its .desktop file, or an AppImage
-    deleted from a folder that is still there (not an unmounted drive)."""
+    """True when a shortcut's app is gone: its .desktop file, an AppImage
+    deleted from a folder that is still there (not an unmounted drive), or a
+    removed shell plugin."""
+    plugin_id = plugin_toggle_id(launch)
+    if plugin_id:
+        return not plugin_installed(plugin_id)
     if len(launch) != 1:
         return False
     path = Path(launch[0])
@@ -358,8 +419,50 @@ def _atomic_write(path, text):
         raise
 
 
+# A shell plugin's shortcut toggles it, like Omarchy's own Clipboard key.
+PLUGIN_TOGGLE = ["omarchy-shell", "shell", "toggle"]
+
+
+def plugin_toggle_id(launch):
+    """The plugin id when launch toggles a shell plugin, else None."""
+    if len(launch) == 4 and launch[:3] == PLUGIN_TOGGLE and _PLUGIN_ID_RE.match(launch[3]):
+        return launch[3]
+    return None
+
+
+# A tray icon's shortcut runs tray.py with the item's Id (and a menu entry).
+TRAY_SCRIPT = str(Path(__file__).resolve().parent / "tray.py")
+
+
+def tray_launch_id(launch):
+    """The tray item Id when launch runs tray.py, else None."""
+    if len(launch) == 2 and Path(launch[0]).name == "tray.py" and _PLUGIN_ID_RE.match(launch[1]):
+        return launch[1]
+    return None
+
+
+# The launcher's own shortcut runs its toggle script.
+SELF_TOGGLE = str(Path(__file__).resolve().parent / "launcher-toggle")
+
+
+def is_self_toggle(launch):
+    return len(launch) == 1 and Path(launch[0]).name == "launcher-toggle"
+
+
+def runs_directly(launch):
+    """Shell plugins, tray icons and the launcher itself are commands, not
+    apps for uwsm-app."""
+    return bool(plugin_toggle_id(launch) or tray_launch_id(launch) or is_self_toggle(launch))
+
+
 def app_launch_argv(app):
     """The argv a shortcut runs (through uwsm-app), matching a list click."""
+    if app.get("self_launcher"):
+        return [SELF_TOGGLE]
+    if app.get("plugin_id"):
+        return [*PLUGIN_TOGGLE, app["plugin_id"]]
+    if app.get("tray_id"):
+        return [TRAY_SCRIPT, app["tray_id"]]
     if "argv" in app:
         return list(app["argv"])
     if app.get("desktop_path"):
@@ -371,6 +474,8 @@ def shortcut_launch(launch, action=""):
     """argv for a shortcut: the app, or one of its desktop actions."""
     if action and len(launch) == 1 and launch[0].endswith(".desktop"):
         return [f"{launch[0]}:{action}"]
+    if action and (tray_launch_id(launch) or is_self_toggle(launch)):
+        return [*launch, action]
     return list(launch)
 
 
@@ -398,18 +503,30 @@ class Bindings:
             self._default_apps[role] = default_app_id(role)
         return self._default_apps[role]
 
+    @staticmethod
+    def _matches(sc, combo, ids):
+        return (modmask(sc) == modmask(combo) and sc["key"].casefold() in ids
+                and (sc.get("then") or "").casefold() == (combo.get("then") or "").casefold())
+
     def _launcher_owner(self, combo, ids):
-        mask = modmask(combo)
         for app_id, entry in self.state["apps"].items():
             for sc in entry["shortcuts"]:
-                if modmask(sc) == mask and sc["key"].casefold() in ids:
+                if self._matches(sc, combo, ids):
                     return app_id, entry
         return None, None
 
-    @staticmethod
-    def _launcher_action(entry, combo, ids):
+    def _sequence_after(self, combo, ids):
+        """A launcher two-step shortcut whose first step is combo."""
+        for entry in self.state["apps"].values():
+            for sc in entry["shortcuts"]:
+                if sc.get("then") and self._matches(leader(sc), combo, ids):
+                    return entry, sc
+        return None, None
+
+    @classmethod
+    def _launcher_action(cls, entry, combo, ids):
         for sc in entry["shortcuts"]:
-            if modmask(sc) == modmask(combo) and sc["key"].casefold() in ids:
+            if cls._matches(sc, combo, ids):
                 return sc.get("action", "")
         return ""
 
@@ -436,6 +553,12 @@ class Bindings:
             return (SAME, owner["name"]) if current == action else (RETARGET, current)
         if owner_id:
             return LAUNCHER, owner["name"]
+        if combo.get("then"):
+            return self.classify_first_step(leader(combo), keycode)
+        entry, sequence = self._sequence_after(combo, ids)
+        if sequence:
+            # The first step of a two-step shortcut cannot open anything itself.
+            return LAUNCHER, f"{entry['name']} ({combo_label(sequence)})"
         if app is not None:
             # Another binding already does exactly this: assigning would only duplicate it.
             for bind in self.external_shortcuts(app):
@@ -443,6 +566,21 @@ class Bindings:
                     if bind["action"] == action:
                         return SAME, bind["description"]
                     break
+        return self._external_level(combo, ids)
+
+    def classify_first_step(self, first, keycode=None):
+        """The first step of a two-step shortcut: free when other two-step
+        shortcuts already start with it (they share it), otherwise taken by
+        whatever has this combo."""
+        ids = key_ids(first, keycode)
+        owner_id, owner = self._launcher_owner(first, ids)
+        if owner_id:
+            return LAUNCHER, owner["name"]
+        if self._sequence_after(first, ids)[1]:
+            return FREE, ""
+        return self._external_level(first, ids)
+
+    def _external_level(self, combo, ids):
         mask = modmask(combo)
         live = [b for b in self.live if b["mask"] == mask and b["key"] in ids]
         user = self._user_bind(combo, ids)
@@ -531,10 +669,21 @@ class Bindings:
                     best, best_args = action["id"], len(extra)
             return best
 
+        if app.get("tray_id"):
+            return []  # Only launcher shortcuts know tray icons.
+        plugin_id = app.get("plugin_id", "")
+        plugin_re = re.compile(r"omarchy[- ]shell\s+shell\s+(?:toggle|summon)\s+['\"]?"
+                               + re.escape(plugin_id.casefold()) + r"(?![\w.-])")
+
         def launches_app(bind):
             """None when bind does not open this app, else the action id it
             opens ("" for the app itself)."""
             command = bind["command"].casefold()
+            if app.get("self_launcher"):
+                found = re.search(r"launcher-toggle(?:['\"]?\s+['\"]?(apps|plugins)\b)?", command)
+                return (found.group(1) or "") if found else None
+            if plugin_id:
+                return "" if plugin_re.search(command) else None
             webapp = _WEBAPP_RE.search(bind["command"])
             if webapp:
                 hit = (_normalize_url(webapp.group(1)) in urls
@@ -581,7 +730,7 @@ class Bindings:
             # Only defaults Hyprland actually has: not overridden by the user,
             # not gated off (e.g. preinstalled bindings disabled).
             if cid in user_ids or not any(
-                    (b["mask"], b["key"]) == cid and b["description"] == bind["description"]
+                    (b["mask"], b["key"]) == cid[:2] and b["description"] == bind["description"]
                     for b in self.live):
                 continue
             action = launches_app(bind)
@@ -617,9 +766,23 @@ def lua_comment(text):
     return "-- " + "".join(" " if ord(ch) < 32 or ord(ch) == 127 else ch for ch in str(text))
 
 
+# While the shortcut page is open the launcher switches Hyprland to this empty
+# submap, so every combo reaches the page instead of running its binding.
+# Super + Escape leaves it, should the launcher ever fail to.
+CAPTURE_SUBMAP = "simple-launcher-capture"
+CAPTURE_ESCAPE = "SUPER + Escape"
+CAPTURE_LUA = (f'hl.define_submap("{CAPTURE_SUBMAP}", function() '
+               f'hl.bind("{CAPTURE_ESCAPE}", hl.dsp.submap("reset")) end)')
+
+
+def submap_name(first):
+    return "simple-launcher-" + re.sub(r"[^a-z0-9]+", "-", combo_string(first).casefold()).strip("-")
+
+
 def render_lua(state):
     lines = ["-- Managed by Simple Launcher (ubruckhaus.simple-launcher-for-fools).",
              "-- Edit shortcuts from the launcher; manual changes here are overwritten.", ""]
+    sequences = {}  # first step id -> (first step, [(entry, combo, command)])
     for app_id in sorted(state["apps"], key=lambda k: state["apps"][k]["name"].casefold()):
         entry = state["apps"][app_id]
         for combo in entry["disabled"]:
@@ -628,12 +791,46 @@ def render_lua(state):
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
         for combo in entry["shortcuts"]:
             command = " ".join(shlex.quote(a) for a in shortcut_launch(entry["launch"], combo.get("action", "")))
+            if combo.get("then"):
+                # Plugins and tray icons run directly; uwsm-app is for apps.
+                line = command if runs_directly(entry["launch"]) else f"uwsm-app -- {command}"
+                first = leader(combo)
+                sequences.setdefault(combo_id(first), (first, []))[1].append((entry, combo, line))
+                continue
+            # Plugins and tray icons run directly; uwsm-app is for apps.
+            dispatcher = (lua_string(command) if runs_directly(entry["launch"])
+                          else f"{{ launch = {lua_string(command)} }}")
             what = f"{entry['name']}: {combo['action']}" if combo.get("action") else entry["name"]
             note = f" (replaces: {combo['replaces']})" if combo.get("replaces") else ""
             lines.append(lua_comment(f"{what}{note}"))
             lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
             lines.append(f"o.bind({lua_string(combo_string(combo))}, {lua_string(entry['name'])}, "
-                         f"{{ launch = {lua_string(command)} }})")
+                         f"{dispatcher})")
+        lines.append("")
+    lines.append(lua_comment("Key capture for the launcher's shortcut page"))
+    lines.append(CAPTURE_LUA)
+    lines.append("")
+    # Two-step shortcuts: the first step enters a submap where the second key
+    # runs the shortcut; any other key leaves it again.
+    for first, items in sorted(sequences.values(), key=lambda group: combo_label(group[0])):
+        name = submap_name(first)
+        replaced = sorted({c["replaces"] for _e, c, _l in items if c.get("replaces")})
+        note = f" (replaces: {', '.join(replaced)})" if replaced else ""
+        lines.append(lua_comment(f"Two-step shortcuts after {combo_label(first)}{note}"))
+        lines.append(f"hl.unbind({lua_string(combo_string(first))})")
+        lines.append(f"hl.define_submap({lua_string(name)}, function()")
+        for entry, combo, line in sorted(items, key=lambda item: item[1]["then"]):
+            what = f"{entry['name']}: {combo['action']}" if combo.get("action") else entry["name"]
+            lines.append("  " + lua_comment(f"{key_label(combo['then'])}: {what}"))
+            lines.append(f"  hl.bind({lua_string(combo['then'])}, function()")
+            lines.append('    hl.dispatch(hl.dsp.submap("reset"))')
+            lines.append(f"    hl.exec_cmd({lua_string(line)})")
+            lines.append(f"  end, {{ description = {lua_string(what)} }})")
+        lines.append('  hl.bind("catchall", hl.dsp.submap("reset"))')
+        lines.append("end)")
+        summary = ", ".join(f"{key_label(c['then'])} {e['name']}" for e, c, _l in items)
+        lines.append(f"hl.bind({lua_string(combo_string(first))}, hl.dsp.submap({lua_string(name)}), "
+                     f"{{ description = {lua_string(('Simple Launcher, then: ' + summary)[:160])} }})")
         lines.append("")
     return "\n".join(lines)
 

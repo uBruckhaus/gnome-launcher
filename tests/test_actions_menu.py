@@ -32,6 +32,7 @@ class ActionsMenuTests(unittest.TestCase):
         self.app.theme.reload.return_value = False
         self.app.hide = Mock()
         self.app.shortcut_app = None
+        self.app.mode = "apps"
 
     def test_status_refresh_resumes_after_menu_closes(self):
         self.app.poll()

@@ -17,12 +17,13 @@ gi.require_version('GioUnix', '2.0')
 from gi.repository import GioUnix
 
 HIDDEN_FILE = Path.home() / ".config/applauncher/hidden.json"
+HIDDEN_PLUGINS_FILE = Path.home() / ".config/applauncher/hidden-plugins.json"
 
 
-def load_hidden_apps():
-    if HIDDEN_FILE.exists():
+def load_hidden_apps(path=HIDDEN_FILE):
+    if path.exists():
         try:
-            data = json.loads(HIDDEN_FILE.read_text())
+            data = json.loads(path.read_text())
             if isinstance(data, list):
                 return set(data)
         except Exception:
@@ -30,10 +31,10 @@ def load_hidden_apps():
     return set()
 
 
-def save_hidden_apps(hidden_set):
+def save_hidden_apps(hidden_set, path=HIDDEN_FILE):
     try:
-        HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-        HIDDEN_FILE.write_text(json.dumps(sorted(hidden_set), indent=2))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(sorted(hidden_set), indent=2))
     except Exception as e:
         print("Could not save hidden apps:", e, file=sys.stderr)
 
@@ -290,6 +291,172 @@ def scan_standalone_appimages(seen_names):
                 "startup_class": startup_class or path.stem,
             })
     return apps
+
+
+SELF_PLUGIN_ID = "ubruckhaus.simple-launcher-for-fools"
+# Shell plugins that are not something to open from a list: this launcher,
+# and helpers the shell summons itself with a payload.
+INTERNAL_PLUGINS = {SELF_PLUGIN_ID, "omarchy.image-picker", "omarchy.osd"}
+# Kinds the shell opens through its own panel loader.
+LOADER_KINDS = ("panel", "overlay", "menu")
+PLUGIN_ICON = "application-x-addon-symbolic"
+_PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_PANEL_ROOT_RE = re.compile(r"^(?:[A-Za-z]+\.)?Panel\s*\{", re.MULTILINE)
+
+
+def plugin_roots():
+    omarchy = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
+    return (Path.home() / ".config/omarchy/plugins", omarchy / "shell/plugins")
+
+
+def plugin_manifests():
+    """id -> (directory, manifest) for installed shell plugins."""
+    found = {}
+    for root in plugin_roots():
+        if not root.is_dir():
+            continue
+        for path in sorted([*root.glob("*/manifest.json"), *root.glob("*/*/manifest.json")]):
+            try:
+                manifest = json.loads(path.read_text())
+            except (OSError, ValueError):
+                continue
+            plugin_id = manifest.get("id") if isinstance(manifest, dict) else None
+            if isinstance(plugin_id, str) and plugin_id not in found:
+                found[plugin_id] = (path.parent, manifest)
+    return found
+
+
+def plugin_can_open(directory, manifest):
+    """Whether `omarchy-shell shell summon` can open this plugin: a panel,
+    overlay or menu, or a bar widget that is a panel itself. Bar widgets that
+    only run a command when clicked have nothing the shell can open."""
+    kinds = manifest.get("kinds") or []
+    if any(kind in kinds for kind in LOADER_KINDS):
+        return True
+    if "bar-widget" not in kinds:
+        return False
+    entry = (manifest.get("entryPoints") or {}).get("barWidget")
+    if not isinstance(entry, str):
+        return False
+    try:
+        path = (directory / entry).resolve()
+        if not path.is_relative_to(directory.resolve()):
+            return False
+        text = path.read_text(errors="ignore")
+    except (OSError, ValueError):
+        return False
+    return bool(_PANEL_ROOT_RE.search(text)) or ("function open" in text and "opened" in text)
+
+
+def self_entry():
+    """The launcher itself, listed so its own shortcut can be set."""
+    return {
+        "name": "Simple Launcher",
+        "plugin_id": SELF_PLUGIN_ID,
+        "self_launcher": True,
+        "exec": str(Path(__file__).resolve().parent / "launcher-toggle"),
+        "icon": "view-app-grid-symbolic",
+        "desktop_path": "",
+        # Each list can have its own shortcut: `launcher-toggle apps|plugins`.
+        "actions": [{"id": "apps", "name": "Show apps", "exec": ""},
+                    {"id": "plugins", "name": "Show widgets & plugins", "exec": ""}],
+        "description": "This launcher — set the keys that open it",
+        "desktop_id": f"plugin:{SELF_PLUGIN_ID}",
+        "startup_class": "",
+        "removable": False,
+    }
+
+
+def parse_plugins():
+    """Enabled shell plugins (widgets, panels, overlays) that can be opened,
+    as list entries shaped like apps, and the launcher itself."""
+    if not shutil.which("omarchy-shell"):
+        return [self_entry()]
+    output = read_bounded_output(["omarchy-shell", "shell", "listPlugins"], max_bytes=512 * 1024, timeout=2)
+    try:
+        listed = json.loads(output) if output else []
+    except ValueError:
+        return []
+    manifests = plugin_manifests()
+    plugins = [self_entry()]
+    for item in listed if isinstance(listed, list) else []:
+        if not isinstance(item, dict) or not item.get("enabled"):
+            continue
+        plugin_id = str(item.get("id", ""))
+        if not _PLUGIN_ID_RE.match(plugin_id) or plugin_id in INTERNAL_PLUGINS:
+            continue
+        directory, manifest = manifests.get(plugin_id, (None, None))
+        if manifest is None or not plugin_can_open(directory, manifest):
+            continue
+        description = manifest.get("description")
+        plugins.append({
+            "name": str(item.get("name") or manifest.get("name") or plugin_id),
+            "plugin_id": plugin_id,
+            "exec": f"omarchy-shell shell toggle {plugin_id}",
+            "icon": PLUGIN_ICON,
+            "desktop_path": "",
+            "actions": [],
+            "description": description.strip() if isinstance(description, str) else "",
+            "desktop_id": f"plugin:{plugin_id}",
+            "startup_class": "",
+            "removable": plugin_removable(plugin_id),
+        })
+    return sorted(plugins, key=lambda plugin: plugin["name"].lower())
+
+
+USER_PLUGINS_DIR = Path.home() / ".config/omarchy/plugins"
+
+
+def plugin_removable(plugin_id):
+    """Installed plugins (marketplace, git or linked) can be removed;
+    Omarchy's built-in ones cannot."""
+    target = USER_PLUGINS_DIR / plugin_id
+    return (_PLUGIN_ID_RE.match(plugin_id) is not None and ".." not in plugin_id
+            and (target.is_dir() or target.is_symlink())
+            and shutil.which("omarchy-plugin-remove") is not None)
+
+
+def _git_count(directory, *args):
+    """git output (bounded: a checkout may have any number of changes), or None."""
+    try:
+        return read_bounded_output(["git", "-C", str(directory), *args], max_bytes=256 * 1024, timeout=3)
+    except OSError:
+        return None
+
+
+def plugin_removal_note(plugin_id):
+    """What `omarchy plugin remove` does with this plugin's folder, and what
+    would be lost: it deletes git checkouts outright."""
+    target = USER_PLUGINS_DIR / plugin_id
+    if target.is_symlink():
+        return "Only the link is removed; the folder it points to stays.", False
+    if not (target / ".git").is_dir():
+        return "The folder is kept as a backup in ~/.config/omarchy/plugins.", False
+    lost = []
+    changed = _git_count(target, "status", "--porcelain")
+    if changed is None:
+        lost.append("its git state could not be checked")
+    elif changed.strip():
+        count = len(changed.strip().splitlines())
+        lost.append(f"{count} changed file{'s' if count != 1 else ''}")
+    ahead = _git_count(target, "rev-list", "--count", "@{u}..HEAD")
+    if ahead is None:
+        lost.append("commits that exist nowhere else (no upstream)")
+    elif ahead.strip() not in ("", "0"):
+        lost.append(f"{ahead.strip()} unpushed commit{'s' if ahead.strip() != '1' else ''}")
+    if lost:
+        return "The folder is deleted, including " + " and ".join(lost) + ".", True
+    return "The folder is deleted; it can be installed again from the marketplace.", False
+
+
+def open_plugin(plugin):
+    """Open a shell plugin; False when the shell could not."""
+    try:
+        output = read_bounded_output(["omarchy-shell", "shell", "summon", plugin["plugin_id"], "{}"],
+                                     max_bytes=4096, timeout=3)
+    except OSError:
+        return False
+    return (output or "").strip() == "ok"
 
 
 def app_window_classes(app):
