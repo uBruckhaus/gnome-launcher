@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 # GTK4 layer shell must load before GTK's Wayland client library. The Python
@@ -38,7 +39,7 @@ import colorsys
 import copy
 import shutil
 from launcher_core import (
-    TERMINALS, app_process_name, background_process_names, child_process_names, client_matches_app,
+    TERMINALS, app_process_name, browser_web_app, background_process_names, child_process_names, client_matches_app,
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     launch_action, launch_app, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
@@ -48,6 +49,13 @@ from palette import ThemePalette
 import pidfile
 import shortcuts
 import tray
+
+# Height of the app list and the shortcut page, whatever they hold.
+LIST_HEIGHT = 590
+
+# Where each browser lists its installed web apps.
+APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
+              "Edge": "edge://apps", "Vivaldi": "vivaldi://apps"}
 
 
 def write_pid_file():
@@ -268,9 +276,18 @@ class Launcher(Gtk.Application):
         overlay.add_overlay(card)
 
         header = Gtk.Box(spacing=8)
-        back_button = Gtk.Button(icon_name="go-previous-symbolic")
+        back_button = Gtk.Button()
         back_button.set_tooltip_text("Back to apps (Esc)")
         back_button.add_css_class("flat")
+        back_button.add_css_class("launcher-back-btn")
+        # The key that does the same, as a hint next to the arrow.
+        back_box = Gtk.Box(spacing=6)
+        back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
+        esc = Gtk.Label(label="Esc")
+        esc.add_css_class("launcher-shortcut-chip")
+        esc.set_valign(Gtk.Align.CENTER)
+        back_box.append(esc)
+        back_button.set_child(back_box)
         back_button.set_visible(False)
         back_button.connect("clicked", lambda *_: self.close_shortcut_page())
         header.append(back_button)
@@ -292,10 +309,34 @@ class Launcher(Gtk.Application):
         header.append(hidden_button)
         card.append(header)
 
+        # Asks before deleting hand-written shortcuts of removed apps.
+        question = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        question.add_css_class("sc-status")
+        question.add_css_class("sc-info")
+        question.set_visible(False)
+        question_label = Gtk.Label(xalign=0, wrap=True, max_width_chars=48)
+        question.append(question_label)
+        answers = Gtk.Box(spacing=6)
+        answers.set_halign(Gtk.Align.END)
+        keep = Gtk.Button(label="Keep")
+        keep.add_css_class("sc-small")
+        keep.connect("clicked", lambda *_: self.answer_dead_binds(False))
+        answers.append(keep)
+        delete = Gtk.Button(label="Delete")
+        delete.add_css_class("sc-primary")
+        delete.add_css_class("sc-danger-btn")
+        delete.connect("clicked", lambda *_: self.answer_dead_binds(True))
+        answers.append(delete)
+        question.append(answers)
+        card.append(question)
+        self.dead_question, self.dead_question_label, self.dead_binds = question, question_label, []
+
         scroller = Gtk.ScrolledWindow()
-        scroller.set_size_request(420, 50)
-        scroller.set_max_content_height(590)
-        scroller.set_propagate_natural_height(True)
+        # A fixed height: the card never shrinks with a short list, a search
+        # or the screen it opens on, and the shortcut page gets the same.
+        scroller.set_size_request(420, -1)
+        scroller.set_min_content_height(LIST_HEIGHT)
+        scroller.set_max_content_height(LIST_HEIGHT)
         # EXTERNAL keeps wheel/touchpad/keyboard scrolling but hides the scrollbar.
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         stack = Gtk.Stack()
@@ -427,7 +468,9 @@ class Launcher(Gtk.Application):
             background-color: #282526;
             border-color: {colors['accent']};
         }}
+        .launcher-back-btn {{ padding: 2px 6px; }}
         .launcher-menu-item {{
+            outline: none;
             background: transparent;
             border-radius: {radius}px;
             padding: 0;
@@ -448,14 +491,14 @@ class Launcher(Gtk.Application):
             min-height: 1px;
             margin: 3px 6px;
         }}
-        .launcher-menu-item:hover {{
+        .launcher-menu-item:focus {{
             background: {sel_hex};
         }}
-        .launcher-menu-item:hover label {{
+        .launcher-menu-item:focus label {{
             color: {sel_fg};
             font-weight: 600;
         }}
-        .launcher-menu-item:hover image {{
+        .launcher-menu-item:focus image {{
             color: {sel_fg};
         }}
         .launcher-menu-item.destructive label {{
@@ -464,11 +507,11 @@ class Launcher(Gtk.Application):
         .launcher-menu-item.destructive image {{
             color: #ff9999;
         }}
-        .launcher-menu-item.destructive:hover {{
+        .launcher-menu-item.destructive:focus {{
             background: {colors['red']};
         }}
-        .launcher-menu-item.destructive:hover label,
-        .launcher-menu-item.destructive:hover image {{
+        .launcher-menu-item.destructive:focus label,
+        .launcher-menu-item.destructive:focus image {{
             color: #ffffff;
         }}
 
@@ -519,7 +562,7 @@ class Launcher(Gtk.Application):
         .launcher-menu-item label.launcher-shortcut-chip {{
             font-size: 10px; font-weight: normal; color: {colors['foreground']};
         }}
-        .launcher-menu-item:hover label.launcher-shortcut-chip {{
+        .launcher-menu-item:focus label.launcher-shortcut-chip {{
             font-weight: normal; color: {sel_desc_fg}; border-color: alpha({sel_desc_fg}, 0.5);
         }}
         .launcher-shortcut-more {{ font-size: 9px; font-weight: 700; color: {colors['background']};
@@ -581,10 +624,8 @@ class Launcher(Gtk.Application):
         .sc-hint-omarchy {{ color: {omarchy_hex}; background: alpha({omarchy_hex}, 0.12); }}
         .launcher-card .sc-hint-omarchy {{ color: {omarchy_hex}; }}
         .sc-primary.sc-omarchy-btn {{ background: {omarchy_hex}; color: {colors['background']}; }}
-        .launcher-menu-item.uninstall {{ background: alpha({error_hex}, 0.16); }}
-        .launcher-menu-item.uninstall label, .launcher-menu-item.uninstall image {{ color: {error_hex}; font-weight: 700; }}
-        .launcher-menu-item.uninstall:hover {{ background: {error_hex}; }}
-        .launcher-menu-item.uninstall:hover label, .launcher-menu-item.uninstall:hover image {{ color: #ffffff; }}
+        .launcher-menu-item.uninstall label, .launcher-menu-item.uninstall image {{ color: {error_hex}; }}
+        .launcher-menu-item.uninstall:focus {{ background: alpha({error_hex}, 0.18); }}
         .sc-other {{ font-size: 11px; border-radius: {radius}px; padding: 3px 8px; min-height: 0;
             background: alpha({colors['foreground']}, 0.06); border: 1px solid alpha({colors['foreground']}, 0.18); }}
         .launcher-card button.sc-other {{ background: transparent; border: 1px solid; }}
@@ -612,6 +653,7 @@ class Launcher(Gtk.Application):
     def open(self):
         self.shortcut_state = shortcuts.load_state()
         self.prune_uninstalled_shortcuts()
+        self.update_dead_binds_question()
         self.list_bindings = None
         try:
             self.apps = parse_desktop_files()
@@ -703,7 +745,13 @@ class Launcher(Gtk.Application):
 
     def reload_apps(self):
         self.apps_changed_source = 0
-        if not (self.window and self.window.get_visible()) or self.shortcut_app is not None:
+        if not (self.window and self.window.get_visible()):
+            # Shortcuts of an app removed while the launcher is closed go now,
+            # not only on the next open; the list follows on open.
+            self.shortcut_state = shortcuts.load_state()
+            self.prune_uninstalled_shortcuts()
+            return GLib.SOURCE_REMOVE
+        if self.shortcut_app is not None:
             return GLib.SOURCE_REMOVE  # Picked up on the next open.
         if self.actions_menu_open():
             self.apps_changed_source = GLib.timeout_add(700, self.reload_apps)
@@ -715,6 +763,7 @@ class Launcher(Gtk.Application):
             if self.mode == "plugins":
                 self.load_plugins()
             self.prune_uninstalled_shortcuts()
+            self.update_dead_binds_question()
             self.refresh_list(selected_id=selected)
         except Exception as e:
             print("Error reloading apps:", e, file=sys.stderr)
@@ -725,18 +774,54 @@ class Launcher(Gtk.Application):
         stay dead and the bindings they replaced work again."""
         state = copy.deepcopy(self.shortcut_state)
         removed = shortcuts.prune_missing(state)
-        if not removed:
-            return
+        names = []
+        if removed:
+            try:
+                shortcuts.save_and_apply(state)
+            except (RuntimeError, OSError) as error:
+                print("Could not drop shortcuts of removed apps:", error, file=sys.stderr)
+            else:
+                self.shortcut_state = shortcuts.load_state()
+                names += [f"{entry['name']} ({', '.join(shortcuts.combo_label(c) for c in entry['shortcuts']) or 'turned-off keys'})"
+                          for entry in removed]
+        if names:
+            self.list_bindings = None
+            self.notify("Shortcuts of removed apps deleted", ", ".join(names))
+
+    def update_dead_binds_question(self):
+        """Hand-written shortcuts of removed apps live in the user's own files:
+        they are only deleted after a yes here, line by line as listed."""
         try:
-            shortcuts.save_and_apply(state)
-        except (RuntimeError, OSError) as error:
-            print("Could not drop shortcuts of removed apps:", error, file=sys.stderr)
+            pending = shortcuts.pending_dead_binds()
+        except OSError:
+            pending = []
+        self.dead_binds = [bind for _path, _number, bind in pending]
+        if not self.dead_binds:
+            self.dead_question.set_visible(False)
             return
-        self.shortcut_state = shortcuts.load_state()
-        self.list_bindings = None
-        keys = ", ".join(f"{entry['name']} ({', '.join(shortcuts.combo_label(c) for c in entry['shortcuts']) or 'turned-off keys'})"
-                         for entry in removed)
-        self.notify("Shortcuts of removed apps dropped", keys)
+        listed = "\n".join(f"• {b['description']}: {shortcuts.combo_label(b['combo'])} ({b['file']})"
+                           for b in self.dead_binds)
+        self.dead_question_label.set_text(
+            f"The app of {'this shortcut' if len(self.dead_binds) == 1 else 'these shortcuts'} was uninstalled. "
+            f"Delete {'it' if len(self.dead_binds) == 1 else 'them'} from your Hyprland files?\n{listed}")
+        self.dead_question.set_visible(True)
+
+    def answer_dead_binds(self, delete):
+        keys = [b["key"] for b in self.dead_binds]
+        self.dead_question.set_visible(False)
+        try:
+            if not delete:
+                shortcuts.keep_binds(keys)
+                return
+            removed = shortcuts.remove_dead_user_binds(keys)
+        except (RuntimeError, OSError) as error:
+            self.notify("Could not delete the shortcuts", str(error))
+            return
+        if removed:
+            self.list_bindings = None
+            self.refresh_list()
+            self.notify("Shortcuts of removed apps deleted",
+                        ", ".join(f"{b['description']} ({shortcuts.combo_label(b['combo'])})" for b in removed))
 
     def on_overlay_click(self, _gesture, _count, x, y):
         picked = self.overlay.pick(x, y, Gtk.PickFlags.DEFAULT)
@@ -1161,8 +1246,23 @@ class Launcher(Gtk.Application):
         popover.set_parent(button)
         self.actions_popover = popover
         popover.connect("closed", self.on_actions_closed)
+        # Right opens the menu, Left closes it again: on a menu item only, so
+        # Left still moves between the buttons of the uninstall question.
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda _c, key, _code, _state: self.close_actions_on_left(popover, key))
+        popover.add_controller(keys)
         self.fill_actions(popover, app)
         popover.popup()
+
+    def close_actions_on_left(self, popover, key):
+        if key not in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
+            return False
+        focus = self.window.get_focus()
+        if focus is None or not focus.has_css_class("launcher-menu-item"):
+            return False
+        popover.popdown()
+        return True
 
     def fill_actions(self, popover, app, trail=()):
         """The actions menu; for a tray icon, trail is the open submenu path."""
@@ -1183,6 +1283,7 @@ class Launcher(Gtk.Application):
             item = Gtk.Button()
             item.add_css_class("flat")
             item.add_css_class("launcher-menu-item")
+            self.focus_follows_pointer(item)
             if is_destructive:
                 item.add_css_class("destructive")
             if css:
@@ -1220,9 +1321,8 @@ class Launcher(Gtk.Application):
         if "tray_id" in app:
             first = self.fill_tray_items(popover, app, trail, box, add_action, add_separator, chip_for)
             popover.set_child(box)
-            if first is not None:
-                first.grab_focus()
             if trail:
+                self.focus_first_entry(box, first)
                 return  # A submenu shows only its entries.
         elif app.get("self_launcher"):
             for action, icon in (("apps", "view-app-grid-symbolic"), ("plugins", "application-x-addon-symbolic")):
@@ -1273,6 +1373,48 @@ class Launcher(Gtk.Application):
             add_action("Uninstall…", lambda: self.confirm_uninstall(owner), "user-trash-symbolic",
                        keep_open=True, css="uninstall")
         popover.set_child(box)
+        self.focus_first_entry(box, first if "tray_id" in app else None)
+
+    @staticmethod
+    def focus_follows_pointer(item):
+        """Moving the pointer onto a menu item focuses it. Menus highlight only
+        the focused item, so what looks selected is what Enter runs; a pointer
+        that merely rests on an item when a menu opens does not move the focus."""
+        shown = time.monotonic()
+
+        def follow(*_):
+            # The pointer "enters" whatever item appears under it as the menu
+            # opens; only a later enter or a move is the user pointing.
+            if time.monotonic() - shown > 0.3 and item.get_sensitive() and not item.has_focus():
+                item.grab_focus()
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", follow)
+        motion.connect("motion", follow)
+        item.add_controller(motion)
+
+    @staticmethod
+    def focus_first_entry(box, first=None):
+        """Focus the menu's first usable entry once it is on screen, so every
+        menu and submenu opens with the keyboard on its top item."""
+        def find(widget):
+            child = widget.get_first_child()
+            while child is not None:
+                if isinstance(child, Gtk.Button):
+                    if child.get_sensitive() and child.get_visible():
+                        return child
+                elif (found := find(child)) is not None:
+                    return found
+                child = child.get_next_sibling()
+            return None
+
+        def focus():
+            target = first if first is not None and first.get_sensitive() else find(box)
+            if target is not None:
+                target.grab_focus()
+            return GLib.SOURCE_REMOVE
+        focus()
+        GLib.idle_add(focus)  # Again after popup(): a new popover moves the focus itself.
 
     def fill_tray_items(self, popover, app, trail, box, add_action, add_separator, chip_for):
         """A tray icon's own menu, one level at a time; long ones scroll.
@@ -1344,17 +1486,38 @@ class Launcher(Gtk.Application):
         box.set_margin_end(10)
         box.set_margin_top(10)
         box.set_margin_bottom(8)
-        message = Gtk.Label(label=f"Do you want to uninstall {app['name']}?", xalign=0, wrap=True,
-                            max_width_chars=32)
+        browser = None if "plugin_id" in app else browser_web_app(app)
+        question = f"How to uninstall {app['name']}" if browser else f"Do you want to uninstall {app['name']}?"
+        message = Gtk.Label(label=question, xalign=0, wrap=True, max_width_chars=32)
         box.append(message)
+        loses_work = False
         if "plugin_id" in app:
             note_text, loses_work = plugin_removal_note(app["plugin_id"])
             note = Gtk.Label(label=note_text, xalign=0, wrap=True, max_width_chars=32)
             note.add_css_class("sc-status")
             note.add_css_class("sc-danger" if loses_work else "sc-info")
             box.append(note)
+        elif browser:
+            # Only the browser can uninstall its web apps: deleting the menu
+            # entry here would not, so there is no Uninstall button.
+            note = Gtk.Label(label=f"{app['name']} is a web app installed in {browser}, so only {browser} "
+                                   f"can uninstall it: open the app and choose ⋮ → Uninstall, or right-click "
+                                   f"it on {APPS_PAGES.get(browser, 'its apps page')} and choose Remove.",
+                             xalign=0, wrap=True, max_width_chars=32)
+            note.add_css_class("sc-status")
+            note.add_css_class("sc-info")
+            box.append(note)
         buttons = Gtk.Box(spacing=6)
         buttons.set_halign(Gtk.Align.END)
+        if browser:
+            close = Gtk.Button(label="Close")
+            close.add_css_class("sc-small")
+            close.connect("clicked", lambda *_: popover.popdown())
+            buttons.append(close)
+            box.append(buttons)
+            popover.set_child(box)
+            close.grab_focus()
+            return
         cancel = Gtk.Button(label="Cancel")
         cancel.add_css_class("sc-small")
         cancel.connect("clicked", lambda *_: popover.popdown())
@@ -1367,17 +1530,32 @@ class Launcher(Gtk.Application):
         buttons.append(confirm)
         box.append(buttons)
         popover.set_child(box)
-        cancel.grab_focus()  # Enter must not uninstall by accident.
+        # Enter confirms, Escape cancels: the terminal still asks for the password
+        # and pacman for a yes. Deleting a plugin checkout with unsaved work asks
+        # nothing more, so there Enter must not do it by accident.
+        (cancel if loses_work else confirm).grab_focus()
 
     def uninstall_app(self, app):
         # Package and Flatpak removal open a terminal that needs the focus.
         self.hide()
         try:
-            subprocess.Popen(["omarchy-remove-launcher-entry", app["desktop_id"], app["name"]],
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True)
-        except OSError as error:
-            self.notify(f"Could not uninstall {app['name']}", str(error))
+            process = Gio.Subprocess.new(["omarchy-remove-launcher-entry", app["desktop_id"], app["name"]],
+                                         Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
+        except GLib.Error as error:
+            self.notify(f"Could not uninstall {app['name']}", error.message)
+            return
+
+        # A failure would otherwise pass silently: say why.
+        def done(proc, result):
+            try:
+                _ok, output, _err = proc.communicate_utf8_finish(result)
+            except GLib.Error as error:
+                output = error.message
+            if not proc.get_successful():
+                lines = (output or "").strip().splitlines()
+                self.notify(f"Could not uninstall {app['name']}", lines[-1] if lines else "")
+
+        process.communicate_utf8_async(None, None, done)
 
     def fill_bar_sections(self, popover, app):
         """Second level of Add to bar: the section to put the widget in."""
@@ -1389,6 +1567,7 @@ class Launcher(Gtk.Application):
             button = Gtk.Button()
             button.add_css_class("flat")
             button.add_css_class("launcher-menu-item")
+            self.focus_follows_pointer(button)
             line = Gtk.Box(spacing=8)
             for side in ("start", "end"):
                 getattr(line, f"set_margin_{side}")(8)
@@ -1671,8 +1850,7 @@ class Launcher(Gtk.Application):
             return
         if not app.get("self_launcher") and not app.get("openable", True):
             return
-        list_height = self.scroller.get_height()
-        self.sc_page.set_size_request(-1, max(list_height, 380))
+        self.sc_page.set_size_request(-1, LIST_HEIGHT)
         self.shortcut_app = app
         self.sc_app_id = shortcuts.app_key(app)
         self.shortcut_state = shortcuts.load_state()
@@ -2430,7 +2608,7 @@ class Launcher(Gtk.Application):
         self.mode = "apps" if self.mode == "plugins" else "plugins"
         if self.mode == "plugins":
             self.load_plugins()
-        self.search_query = ""
+        # The search stays: it filters the other list the same way.
         self.update_hidden_button_state()
         self.refresh_list(selected_id="")
 

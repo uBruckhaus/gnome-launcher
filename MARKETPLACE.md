@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.5.0`
+- **Version**: `1.6.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 1.6 — tidier uninstalls and menus.** Shortcuts of uninstalled apps are cleaned up right away; hand-written ones in your own Hyprland files are only deleted after you answer **Delete** (with a backup), **Keep** is remembered. App menus open on their first entry, the mouse moves the same single highlight the keyboard uses, and Left closes a menu. **Uninstall…** is quieter, focuses its button, reports failures, and for browser web apps (Chrome, Brave, Edge, …) explains how to remove them in the browser. The list keeps a steady height, the search stays when switching between apps and widgets, and the shortcut page shows an `Esc` hint next to its back arrow.
 
 **New in 1.5 — the bar from the widget list.** Widgets in the bar have **Remove from bar**; widgets taken out of it move to the hidden list (the eye shows them) with **Add to bar ›**, which asks for the section — Left, Center or Right — using Omarchy's own `omarchy plugin enable/disable`. Only plugins with something to open are listed; bar parts like Workspaces or Indicators are left out.
 
@@ -74,7 +76,7 @@ New in 1.1: give any app its own global Hyprland shortcut straight from the laun
   - **Non-destructive**: Your config files are never edited. Shortcuts live in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`; overriding or turning off a binding is an `hl.unbind` there, so removing the shortcut brings the original back. Every change is checked with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 - 🧩 **Widgets, Plugins & Tray Apps (new in 1.4)**: A second list for Omarchy shell widgets and plugins and the apps running in the bar tray, each with open, shortcut, hide, uninstall and quit — the same way as apps.
 - ⏭️ **Two-Step Shortcuts (new in 1.4)**: Sequences like `Super + Alt + Space`, then `N`; just press them on the shortcut page.
-- 🔄 **Always Current (new in 1.3)**: The app list refreshes live when apps are installed or removed; shortcuts of uninstalled apps are dropped so their keys work again; after a plugin update the launcher restarts itself on the next open.
+- 🔄 **Always Current (new in 1.3)**: The app list refreshes live when apps are installed or removed; shortcuts of uninstalled apps are dropped so their keys work again (hand-written ones only after you confirm); after a plugin update the launcher restarts itself on the next open.
 - 🗑️ **Uninstall (new in 1.3)**: The last item of the app menu asks “Do you want to uninstall …?” and hands over to Omarchy's own `omarchy-remove-launcher-entry`.
 - 🪶 **Lightweight & Self-Contained**: Runs on standard system Python, GIO, and GTK4. Zero heavy virtual environments, background node daemons, or bloated runtime dependencies.
 

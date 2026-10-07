@@ -4,6 +4,8 @@ Fast, theme-aware application launcher popup and bar widget for [Omarchy](https:
 
 ![Simple Launcher](preview.png)
 
+**New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
+
 **New in 1.5:** put widgets into the bar (left, center or right) or take them out, right from the widget list.
 
 **New in 1.4:** a second list for Omarchy **widgets, plugins and running tray apps** (Steam, NordVPN, LM Studio, …) with their own menus and shortcuts, **Uninstall** for marketplace plugins, **Quit** for background apps, **two-step shortcuts** (`Super + Alt + Space`, then `N`), keys captured just by pressing them, and separate keys for the app list and the widget list.
@@ -72,7 +74,7 @@ Open app menus survive background running-status updates, app-directory refreshe
 - **PWA & AppImage Support**: Automatically scans `.desktop` files, Chromium/Chrome Progressive Web Apps (PWAs), and standalone AppImage executables.
 - **Hidden Apps Management**: Conceal distracting helper tools or background daemons from the launcher view with one click, or toggle visibility with the top-right eye icon.
 - **Uninstall**: The last item of an app's actions menu asks “Do you want to uninstall …?” like Omarchy's menu, then runs `omarchy-remove-launcher-entry`, which removes web apps and TUIs, deletes your own launcher entries, and uninstalls packages (pacman, in a terminal) or Flatpaks.
-- **Always Current**: Apps are re-read on every open, and the open list refreshes when apps are installed or removed. Shortcuts of uninstalled apps are dropped (with a notification), so their keys work again. After a plugin update the launcher restarts itself with the new code on the next open.
+- **Always Current**: Apps are re-read on every open, and the open list refreshes when apps are installed or removed. Launcher shortcuts of uninstalled apps are deleted (with a notification), even while the launcher is closed, so their keys work again. Hand-written one-line `launch = "..."` binds in `~/.config/hypr/*.lua` whose app is gone are only listed: the launcher asks **Delete** or **Keep** and changes your file only after **Delete**, keeping a backup as `<file>.before-simple-launcher-cleanup`; **Keep** is remembered in `~/.config/applauncher/kept-binds.json`. After a plugin update the launcher restarts itself with the new code on the next open.
 - **App Shortcuts**: Bind a global Hyprland shortcut to any app from its actions menu (`Shortcut…` or `Ctrl+K`). Every key shows who has it; taken keys — your own bindings or Omarchy defaults — can simply be rebound, and come back when the shortcut is removed.
 - **Lightweight & Self-Contained**: Powered by standard system Python and GIO/GTK4. No heavy background virtual environments needed.
 

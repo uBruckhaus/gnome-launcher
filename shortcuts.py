@@ -3,9 +3,11 @@
 Shortcuts are stored in ~/.config/applauncher/shortcuts.json and rendered to
 ~/.config/hypr/simple-launcher-shortcuts.lua, which hyprland.lua requires last
 so launcher shortcuts win over Omarchy defaults and hand-written bindings.
-Nothing outside that generated file is ever rewritten; replacing or disabling
-another binding is an `hl.unbind` in the generated file, so removing the
-launcher shortcut restores the original binding on the next reload.
+Replacing or disabling another binding is an `hl.unbind` in the generated
+file, so removing the launcher shortcut restores the original binding on the
+next reload. The only edit to hand-written files is deleting a single-line
+`launch = "..."` bind whose app was uninstalled, and only after the user
+said yes to exactly that line (with a backup next to it).
 """
 
 import json
@@ -18,6 +20,8 @@ import tempfile
 from pathlib import Path
 
 STATE_FILE = Path.home() / ".config/applauncher/shortcuts.json"
+# Hand-written binds of removed apps the user chose to keep: not asked again.
+KEPT_FILE = Path.home() / ".config/applauncher/kept-binds.json"
 HYPR_DIR = Path.home() / ".config/hypr"
 LUA_MODULE = "simple-launcher-shortcuts"
 LUA_FILE = HYPR_DIR / f"{LUA_MODULE}.lua"
@@ -405,6 +409,115 @@ def prune_missing(state):
     for key in removed:
         del state["apps"][key]
     return list(removed.values())
+
+
+_LAUNCH_RE = re.compile(r'\blaunch\s*=\s*"([^"]+)"')
+
+
+def _desktop_entry_exists(desktop_id):
+    data_home = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+    name = desktop_id if desktop_id.endswith(".desktop") else desktop_id + ".desktop"
+    return any((Path(d) / "applications" / name).exists() for d in (data_home, *data_dirs) if d.strip())
+
+
+def launch_command_missing(command):
+    """True when a hand-written `launch = "..."` opens a program or desktop
+    entry that is no longer installed. Unclear commands count as present."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if argv[:1] in (["uwsm-app"], ["uwsm"]):
+        argv = argv[2:] if argv[1:2] == ["app"] else argv[1:]
+        if argv[:1] == ["--"]:
+            argv = argv[1:]
+    if argv[:1] == ["env"]:
+        argv = argv[1:]
+        while argv and "=" in argv[0]:
+            argv = argv[1:]
+    if not argv:
+        return False
+    program = argv[0]
+    if program == "gtk-launch":
+        return len(argv) > 1 and not _desktop_entry_exists(argv[1])
+    if "/" in program:
+        path = Path(program)
+        if path.suffix == ".desktop":
+            return not path.exists()
+        return path.parent.is_dir() and not path.exists()
+    return shutil.which(program) is None
+
+
+def bind_key(path, line):
+    """Identifies one hand-written line: its file and its exact text."""
+    return f"{path}\0{line}"
+
+
+def load_kept():
+    try:
+        data = json.loads(KEPT_FILE.read_text())
+    except (OSError, ValueError):
+        return set()
+    return {k for k in data if isinstance(k, str)} if isinstance(data, list) else set()
+
+
+def keep_binds(keys):
+    """Remember that the user keeps these lines; they are not offered again."""
+    _atomic_write(KEPT_FILE, json.dumps(sorted(load_kept() | set(keys)), indent=2) + "\n")
+
+
+def pending_dead_binds(files=None):
+    """Dead hand-written binds the user has not chosen to keep yet."""
+    kept = load_kept()
+    return [d for d in dead_user_binds(files) if d[2]["key"] not in kept]
+
+
+def dead_user_binds(files=None):
+    """Hand-written single-line binds whose app was uninstalled, as
+    (path, line number, bind) tuples."""
+    dead = []
+    for path in user_config_files() if files is None else files:
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines):
+            code = _strip_lua_comment(line)
+            match = _BIND_RE.search(code)
+            launch = _LAUNCH_RE.search(code) if match else None
+            combo = parse_combo(match.group(1)) if match else None
+            if launch and combo and launch_command_missing(launch.group(1)):
+                dead.append((path, number, {"combo": combo, "description": match.group(2) or launch.group(1),
+                                            "file": path.name, "key": bind_key(path, line)}))
+    return dead
+
+
+def remove_dead_user_binds(keys, files=None):
+    """Delete the hand-written shortcuts of uninstalled apps the user agreed
+    to (by bind_key) from their files, keeping a backup of each changed file,
+    and reload Hyprland. Lines that changed since, or whose app is back, stay.
+    Returns the removed binds; restores the files on a new config error."""
+    keys = set(keys)
+    dead = [d for d in dead_user_binds(files) if d[2]["key"] in keys]
+    if not dead:
+        return []
+    errors_before = _config_errors()
+    originals = {}
+    for path in {p for p, _n, _b in dead}:
+        text = path.read_text()
+        originals[path] = text
+        drop = {n for p, n, _b in dead if p == path}
+        kept = [line for n, line in enumerate(text.splitlines(keepends=True)) if n not in drop]
+        shutil.copy2(path, path.with_name(path.name + ".before-simple-launcher-cleanup"))
+        _atomic_write(path, "".join(kept))
+    errors = _config_errors()
+    if errors and errors != errors_before:
+        for path, text in originals.items():
+            _atomic_write(path, text)
+        _config_errors()
+        raise RuntimeError(errors)
+    return [b for _p, _n, b in dead]
 
 
 def _atomic_write(path, text):

@@ -63,6 +63,15 @@ class DesktopLaunchTests(unittest.TestCase):
             self.assertFalse(launcher_core.launch_app({"exec": "touch INJECTED"}))
         spawn.assert_not_called()
 
+class BrowserWebAppTest(unittest.TestCase):
+    def test_chrome_web_apps_are_recognised(self):
+        chrome = {"exec": "/opt/google/chrome/google-chrome --profile-directory=Default --app-id=mbfdd"}
+        self.assertEqual(launcher_core.browser_web_app(chrome), "Chrome")
+        self.assertEqual(launcher_core.browser_web_app({"exec": "brave --app-id=x"}), "Brave")
+        self.assertEqual(launcher_core.browser_web_app({"exec": "odd-browser --app-id=x"}), "the browser")
+        for other in ("/opt/google/chrome/google-chrome", "omarchy-launch-webapp https://x.y", "", '"'):
+            self.assertIsNone(launcher_core.browser_web_app({"exec": other}))
+
 
 if __name__ == "__main__":
     unittest.main()

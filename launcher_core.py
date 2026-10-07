@@ -69,6 +69,27 @@ def is_pwa(values):
     return icon.startswith("/") and icon.endswith(".png")
 
 
+# Browsers whose installed web apps start with --app-id; their menu entry is
+# only a copy that the browser writes again while the app stays installed.
+WEB_APP_BROWSERS = {
+    "google-chrome": "Chrome", "google-chrome-stable": "Chrome", "chrome": "Chrome",
+    "chromium": "Chromium", "brave": "Brave", "brave-browser": "Brave",
+    "microsoft-edge": "Edge", "microsoft-edge-stable": "Edge", "vivaldi": "Vivaldi",
+}
+
+
+def browser_web_app(app):
+    """The browser name when app is a web app installed in a Chromium-based
+    browser (Chrome's "Install page as app"), else None."""
+    try:
+        argv = shlex.split(app.get("exec", ""))
+    except ValueError:
+        return None
+    if not argv or not any(a.startswith("--app-id=") for a in argv):
+        return None
+    return WEB_APP_BROWSERS.get(Path(argv[0]).name, "the browser")
+
+
 def executable_exists(command):
     """Check the program named by a desktop entry without running it."""
     try:

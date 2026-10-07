@@ -1,5 +1,7 @@
+import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import shortcuts
@@ -267,6 +269,52 @@ class ShortcutTests(unittest.TestCase):
         removed = shortcuts.prune_missing(state)
         self.assertEqual(sorted(Path(e["name"]).name for e in removed), ["gone.AppImage", "gone.desktop"])
         self.assertEqual(sorted(state["apps"]), ["kept.AppImage", "kept.desktop", "unmounted"])
+
+    def test_dead_user_binds_are_deleted_with_a_backup(self):
+        tmp = Path(self.tmp.name)
+        apps = tmp / "share/applications"
+        apps.mkdir(parents=True)
+        (apps / "kept.desktop").write_text("")
+        bindings = tmp / "bindings.lua"
+        bindings.write_text(
+            'hl.unbind("SUPER + SHIFT + B")\n'
+            'o.bind("SUPER + SHIFT + B", "Brave", { launch = "brave-gone-for-test" })\n'
+            'o.bind("SUPER + SHIFT + K", "Kept", { launch = "gtk-launch kept" })\n'
+            'o.bind("SUPER + SHIFT + G", "Gone", { launch = "uwsm-app -- gtk-launch gone" })\n'
+            'o.bind("SUPER + SHIFT + S", "Shell", { launch = "sh -c true" })\n'
+            '-- o.bind("SUPER + SHIFT + C", "Commented", { launch = "nothing-here" })\n'
+            'o.bind("SUPER + SHIFT + H", "Plain", "missing-but-not-a-launch")\n')
+        env = {"XDG_DATA_HOME": str(tmp / "share"), "XDG_DATA_DIRS": str(tmp / "none")}
+        kept_file = tmp / "kept.json"
+        with unittest.mock.patch.dict(os.environ, env), \
+                unittest.mock.patch.object(shortcuts, "KEPT_FILE", kept_file), \
+                unittest.mock.patch.object(shortcuts, "_config_errors", return_value=""):
+            pending = shortcuts.pending_dead_binds([bindings])
+            self.assertEqual([b["description"] for _p, _n, b in pending], ["Brave", "Gone"])
+            # Nothing is deleted without a yes for that exact line.
+            self.assertEqual(shortcuts.remove_dead_user_binds([], [bindings]), [])
+            self.assertIn("Brave", bindings.read_text())
+            # Kept lines are not offered again.
+            shortcuts.keep_binds([pending[1][2]["key"]])
+            self.assertEqual([b["description"] for _p, _n, b in shortcuts.pending_dead_binds([bindings])], ["Brave"])
+            removed = shortcuts.remove_dead_user_binds([b["key"] for _p, _n, b in pending], [bindings])
+        self.assertEqual([b["description"] for b in removed], ["Brave", "Gone"])
+        text = bindings.read_text()
+        self.assertNotIn("Brave", text)
+        self.assertNotIn('"Gone"', text)
+        for kept in ('hl.unbind("SUPER + SHIFT + B")', "Kept", "Shell", "Commented", "Plain"):
+            self.assertIn(kept, text)
+        self.assertIn("Brave", (tmp / "bindings.lua.before-simple-launcher-cleanup").read_text())
+
+    def test_dead_user_binds_restored_on_config_error(self):
+        bindings = Path(self.tmp.name) / "bindings.lua"
+        original = 'o.bind("SUPER + SHIFT + B", "Brave", { launch = "brave-gone-for-test" })\n'
+        bindings.write_text(original)
+        with unittest.mock.patch.object(shortcuts, "_config_errors", side_effect=["", "boom", ""]):
+            with self.assertRaises(RuntimeError):
+                key = shortcuts.bind_key(bindings, original.rstrip("\n"))
+                shortcuts.remove_dead_user_binds([key], [bindings])
+        self.assertEqual(bindings.read_text(), original)
 
     def test_render_lua_quotes_names_and_paths(self):
         state = {"apps": {"x": {"name": 'Evil "name"\nhl.exec_cmd("rm")',

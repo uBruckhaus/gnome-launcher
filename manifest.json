@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "Simple Launcher",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list, where widgets can also be put into or taken out of the bar. See who owns every key, rebind it in one click, or use two-step shortcuts.",
