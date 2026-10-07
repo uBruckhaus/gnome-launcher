@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.4.1`
+- **Version**: `1.5.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -20,7 +20,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 🏷️ Short Description (Tagline)
 
-> Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list. See who owns every key, rebind it in one click, or use two-step shortcuts.
+> Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list, where widgets can also be put into or taken out of the bar. See who owns every key, rebind it in one click, or use two-step shortcuts.
 
 ---
 
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 1.5 — the bar from the widget list.** Widgets in the bar have **Remove from bar**; widgets taken out of it move to the hidden list (the eye shows them) with **Add to bar ›**, which asks for the section — Left, Center or Right — using Omarchy's own `omarchy plugin enable/disable`. Only plugins with something to open are listed; bar parts like Workspaces or Indicators are left out.
 
 **New in 1.4 — widgets, plugins and tray apps, two-step shortcuts.**
 

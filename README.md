@@ -4,6 +4,8 @@ Fast, theme-aware application launcher popup and bar widget for [Omarchy](https:
 
 ![Simple Launcher](preview.png)
 
+**New in 1.5:** put widgets into the bar (left, center or right) or take them out, right from the widget list.
+
 **New in 1.4:** a second list for Omarchy **widgets, plugins and running tray apps** (Steam, NordVPN, LM Studio, …) with their own menus and shortcuts, **Uninstall** for marketplace plugins, **Quit** for background apps, **two-step shortcuts** (`Super + Alt + Space`, then `N`), keys captured just by pressing them, and separate keys for the app list and the widget list.
 
 ## Advanced shortcuts
@@ -15,6 +17,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **One-click rebinding**: taking over a key is an option, not an error. **Rebind** turns the old binding off while your shortcut exists; remove the shortcut and the original works again.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
+## Changes in 1.5.0
+
+**Bar placement from the widget list.** Every widget with something to open is listed, in the bar or not. Bar parts with nothing to open — Workspaces, System tray, Indicators, Keyboard layout, or widgets like Simple Recipes whose icon only runs a command — are not listed at all. A widget's `☰` menu has **Remove from bar** or **Add to bar ›**, which asks for the section — **Left**, **Center** or **Right**, the widget's own default marked (Omarchy's `omarchy plugin disable` / `enable <id> <section>`); widgets that are not in the bar count as hidden: they show (dimmed, marked *Not in bar*) only while the eye shows hidden entries, so a removed widget leaves the list and comes back with **Add to bar**. Simple Launcher's own entry always stays. A widget out of the bar has no **Open** and no **Shortcut…** until it is back, because its panel opens from its bar button. **Hide from list** stays separate: it only hides the entry in the launcher.
 
 ## Changes in 1.4.1
 

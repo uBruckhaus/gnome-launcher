@@ -42,7 +42,7 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     launch_action, launch_app, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
-    plugin_removal_note, save_hidden_apps, USER_PLUGINS_DIR,
+    plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
 )
 from palette import ThemePalette
 import pidfile
@@ -938,7 +938,9 @@ class Launcher(Gtk.Application):
             self.list_bindings = shortcuts.Bindings(self.shortcut_state)
         for app in self.plugins if self.mode == "plugins" else self.apps:
             is_hidden = app["desktop_id"] in self.hidden_ids
-            if is_hidden and not self.show_hidden:
+            # Bar widgets taken out of the bar are hidden too: the eye shows them
+            # to put them back. The launcher itself stays, for its own keys.
+            if (is_hidden or self.off_bar(app)) and not self.show_hidden:
                 continue
             if query not in app["name"].casefold():
                 continue
@@ -984,14 +986,21 @@ class Launcher(Gtk.Application):
             name.set_ellipsize(3)
             title_row.append(name)
 
+            badges = []
             if is_hidden:
+                badges.append(("view-conceal-symbolic", "Hidden"))
+            if app.get("bar_widget") and not app.get("in_bar"):
+                badges.append(("list-remove-symbolic", "Not in bar"))
+                row.add_css_class("launcher-row-hidden")
+                icon.add_css_class("launcher-hidden-icon")
+            for badge_icon, badge_text in badges:
                 badge = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
                 badge.add_css_class("launcher-hidden-badge")
                 badge.set_valign(Gtk.Align.CENTER)
-                eye_icon = Gtk.Image.new_from_icon_name("view-conceal-symbolic")
+                eye_icon = Gtk.Image.new_from_icon_name(badge_icon)
                 eye_icon.set_pixel_size(11)
                 badge.append(eye_icon)
-                badge_lbl = Gtk.Label(label="Hidden")
+                badge_lbl = Gtk.Label(label=badge_text)
                 badge.append(badge_lbl)
                 title_row.append(badge)
 
@@ -1065,6 +1074,12 @@ class Launcher(Gtk.Application):
             title.set_margin_top(8)
         row.set_header(title)
 
+    @staticmethod
+    def off_bar(app):
+        """A bar widget taken out of the bar: listed only with hidden entries.
+        The launcher itself always stays, for its own keys."""
+        return bool(app.get("bar_widget")) and not app.get("in_bar") and not app.get("self_launcher")
+
     def ensure_selected_visible(self, row):
         if row.get_parent() == self.rows and self.rows.get_selected_row() == row:
             row.grab_focus()
@@ -1108,6 +1123,13 @@ class Launcher(Gtk.Application):
             return
         if app.get("self_launcher"):
             self.open_shortcut_page(app)  # Already open: Enter sets its keys.
+            return
+        if "plugin_id" in app and not app.get("openable", True):
+            if button is not None:
+                self.show_actions(button, app)
+            else:
+                self.notify(f"{app['name']} cannot be opened from here",
+                            "Put it in the bar first." if app.get("bar_widget") and not app.get("in_bar") else "")
             return
         if "plugin_id" not in app:
             launch_app(app)
@@ -1209,22 +1231,35 @@ class Launcher(Gtk.Application):
                            shortcut=chip_for(action))
             add_separator()
         else:
-            add_action("Open", lambda: self.launch(app), "media-playback-start-symbolic",
-                       shortcut=chip_for(""))
+            if app.get("openable", True):
+                add_action("Open", lambda: self.launch(app), "media-playback-start-symbolic",
+                           shortcut=chip_for(""))
             for action in app.get("actions", []):
                 add_action(action["name"], lambda action_id=action["id"]:
                            (launch_action(app, action_id), self.hide()), "system-run-symbolic",
                            shortcut=chip_for(action["id"]))
 
-        if not app.get("self_launcher"):
+        # A shortcut needs something to open: not a widget that is only a bar part.
+        if app.get("self_launcher") or app.get("openable", True):
+            if not app.get("self_launcher"):
+                add_separator()
+            add_action("Shortcut…", lambda: self.open_shortcut_page(app),
+                       "preferences-desktop-keyboard-shortcuts-symbolic")
             add_separator()
-        add_action("Shortcut…", lambda: self.open_shortcut_page(app),
-                   "preferences-desktop-keyboard-shortcuts-symbolic")
-        add_separator()
         hidden = app["desktop_id"] in self.hidden_by_mode["plugins" if is_widget(app) else "apps"]
-        add_action("Unhide from list" if hidden else "Hide from list",
-                   lambda: self.set_hidden(app, not hidden),
-                   "view-reveal-symbolic" if hidden else "view-conceal-symbolic")
+        # Out of the bar, a widget is hidden by that already: Hide would do nothing.
+        # Unhide stays for one hidden by hand, or it stays hidden once back in the bar.
+        if hidden or not self.off_bar(app):
+            add_action("Unhide from list" if hidden else "Hide from list",
+                       lambda: self.set_hidden(app, not hidden),
+                       "view-reveal-symbolic" if hidden else "view-conceal-symbolic")
+        if app.get("bar_widget") and set_in_bar(app["plugin_id"], not app["in_bar"]):
+            if app["in_bar"]:
+                add_action("Remove from bar", lambda: self.set_bar_placement(app, False), "list-remove-symbolic")
+            else:
+                # Where it goes is the user's choice: left, center or right.
+                add_action("Add to bar", lambda: self.fill_bar_sections(popover, app), "list-add-symbolic",
+                           keep_open=True, end_icon="go-next-symbolic")
         state = self.app_state(app) if not is_widget(app) else "stopped"
         if state == "active":
             add_action("Close", lambda: self.close_app(app), "window-close-symbolic", is_destructive=True)
@@ -1343,6 +1378,87 @@ class Launcher(Gtk.Application):
                              start_new_session=True)
         except OSError as error:
             self.notify(f"Could not uninstall {app['name']}", str(error))
+
+    def fill_bar_sections(self, popover, app):
+        """Second level of Add to bar: the section to put the widget in."""
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(box, f"set_margin_{side}")(4)
+
+        def item(label, icon, callback, note=None):
+            button = Gtk.Button()
+            button.add_css_class("flat")
+            button.add_css_class("launcher-menu-item")
+            line = Gtk.Box(spacing=8)
+            for side in ("start", "end"):
+                getattr(line, f"set_margin_{side}")(8)
+            line.set_margin_top(6)
+            line.set_margin_bottom(6)
+            image = Gtk.Image.new_from_icon_name(icon)
+            image.set_pixel_size(14)
+            line.append(image)
+            text = Gtk.Label(label=label, xalign=0)
+            text.set_hexpand(True)
+            line.append(text)
+            if note:
+                tag = Gtk.Label(label=note)
+                tag.add_css_class("launcher-shortcut-chip")
+                line.append(tag)
+            button.set_child(line)
+            button.connect("clicked", lambda *_: callback())
+            box.append(button)
+            return button
+
+        item("Back", "go-previous-symbolic", lambda: self.fill_actions(popover, app))
+        title = Gtk.Label(label=f"Add {app['name']} to the bar", xalign=0)
+        title.add_css_class("sc-section")
+        title.set_margin_start(8)
+        box.append(title)
+        default = app.get("bar_section") if app.get("bar_section") in BAR_SECTIONS else None
+        buttons = {section: item(section.capitalize(), f"format-justify-{section}-symbolic",
+                                 lambda s=section: (popover.popdown(), self.set_bar_placement(app, True, s)),
+                                 "default" if section == default else None)
+                   for section in BAR_SECTIONS}
+        popover.set_child(box)
+        buttons[default or "left"].grab_focus()
+
+    def set_bar_placement(self, plugin, placed, section=None):
+        """Put a bar widget into a bar section or take it out (omarchy plugin
+        enable/disable). Runs in the background; the list follows."""
+        argv = set_in_bar(plugin["plugin_id"], placed, section)
+        if argv is None:
+            return
+        try:
+            process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
+        except GLib.Error as error:
+            self.notify(f"Could not change the bar for {plugin['name']}", error.message)
+            return
+
+        # Taken out of the bar, the row leaves the list: keep the place there.
+        selected_id = plugin["desktop_id"]
+        if not placed and not self.show_hidden:
+            row = self.rows.get_first_child()
+            while row is not None:
+                if getattr(row, "app", None) is plugin:
+                    neighbour = row.get_next_sibling() or row.get_prev_sibling()
+                    if neighbour is not None and hasattr(neighbour, "app"):
+                        selected_id = neighbour.app["desktop_id"]
+                    break
+                row = row.get_next_sibling()
+
+        def done(proc, result):
+            try:
+                _ok, output, _err = proc.communicate_utf8_finish(result)
+            except GLib.Error as error:
+                output = error.message
+            if not proc.get_successful():
+                lines = (output or "").strip().splitlines()
+                self.notify(f"Could not change the bar for {plugin['name']}", lines[-1] if lines else "")
+            if self.mode == "plugins" and self.window.get_visible() and self.shortcut_app is None:
+                self.load_plugins()
+                self.refresh_list(selected_id=selected_id)
+
+        process.communicate_utf8_async(None, None, done)
 
     def uninstall_plugin(self, plugin):
         """omarchy plugin remove: disables it, unloads it from the shell and
@@ -1552,6 +1668,8 @@ class Launcher(Gtk.Application):
 
     def open_shortcut_page(self, app):
         if shortcuts.app_launch_argv(app) is None:
+            return
+        if not app.get("self_launcher") and not app.get("openable", True):
             return
         list_height = self.scroller.get_height()
         self.sc_page.set_size_request(-1, max(list_height, 380))

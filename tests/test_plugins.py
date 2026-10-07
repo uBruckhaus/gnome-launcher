@@ -125,21 +125,41 @@ class PluginDiscoveryTests(unittest.TestCase):
             "button", ["bar-widget"], "BarWidget {\n  onClicked: run()\n}")))
         self.assertFalse(launcher_core.plugin_can_open(*self.plugin("service", ["service"])))
 
-    def test_parse_plugins_lists_enabled_openable_plugins(self):
+    def test_parse_plugins_lists_only_what_can_be_opened(self):
         self.plugin("zeta", ["overlay"])
         self.plugin("alpha", ["panel"])
         self.plugin("off", ["panel"])
         self.plugin("button", ["bar-widget"], "BarWidget {}")
-        listed = [{"id": i, "name": i.title(), "enabled": i != "off"}
-                  for i in ("zeta", "alpha", "off", "button", launcher_core.SELF_PLUGIN_ID)]
+        self.plugin("unplaced", ["bar-widget"], "Panel {\n}")
+        listed = [{"id": i, "name": i.title(), "enabled": i not in ("off", "unplaced")}
+                  for i in ("zeta", "alpha", "off", "button", "unplaced", launcher_core.SELF_PLUGIN_ID)]
+        # Bar parts without a manifest (Workspaces, Spacer, …) have nothing to open.
+        listed.append({"id": "omarchy.workspaces", "name": "Workspaces", "kinds": ["bar-widget"], "enabled": True})
+        listed.append({"id": "omarchy.spacer", "name": "Spacer", "kinds": ["bar-widget"], "enabled": False})
         with mock.patch.object(launcher_core, "plugin_roots", return_value=(self.root,)), \
                 mock.patch.object(launcher_core.shutil, "which", return_value="/usr/bin/omarchy-shell"), \
                 mock.patch.object(launcher_core, "read_bounded_output", return_value=json.dumps(listed)):
-            plugins = launcher_core.parse_plugins()
-        self.assertEqual([p["plugin_id"] for p in plugins], ["alpha", launcher_core.SELF_PLUGIN_ID, "zeta"])
-        self.assertTrue(plugins[1]["self_launcher"])
-        self.assertEqual(plugins[0]["desktop_id"], "plugin:alpha")
-        self.assertEqual(plugins[0]["description"], "alpha plugin")
+            plugins = {p["plugin_id"]: p for p in launcher_core.parse_plugins()}
+        # A disabled panel and bar parts with nothing to open are left out;
+        # widgets with a panel stay, in the bar or not.
+        self.assertEqual(sorted(plugins), sorted(["alpha", "unplaced", "zeta", launcher_core.SELF_PLUGIN_ID]))
+        self.assertEqual(plugins["alpha"]["description"], "alpha plugin")
+        self.assertEqual((plugins["unplaced"]["in_bar"], plugins["unplaced"]["openable"]), (False, False))
+        self.assertEqual((plugins["zeta"]["bar_widget"], plugins["zeta"]["openable"]), (False, True))
+        self.assertTrue(plugins[launcher_core.SELF_PLUGIN_ID]["bar_widget"])
+
+    def test_bar_placement_uses_omarchy_commands(self):
+        with mock.patch.object(launcher_core.shutil, "which", return_value="/usr/bin/x"):
+            self.assertEqual(launcher_core.set_in_bar("omarchy.audio", False), ["omarchy-plugin-disable", "omarchy.audio"])
+            self.assertEqual(launcher_core.set_in_bar("omarchy.audio", True), ["omarchy-plugin-enable", "omarchy.audio"])
+            self.assertIsNone(launcher_core.set_in_bar("a;rm -rf ~", True))
+            self.assertEqual(launcher_core.set_in_bar("omarchy.audio", True, "center"),
+                             ["omarchy-plugin-enable", "omarchy.audio", "center"])
+            self.assertEqual(launcher_core.set_in_bar("omarchy.audio", False, "left"),
+                             ["omarchy-plugin-disable", "omarchy.audio"])
+            self.assertIsNone(launcher_core.set_in_bar("omarchy.audio", True, "--index=0"))
+        with mock.patch.object(launcher_core.shutil, "which", return_value=None):
+            self.assertIsNone(launcher_core.set_in_bar("omarchy.audio", True))
 
     def test_parse_plugins_without_shell_lists_only_the_launcher(self):
         with mock.patch.object(launcher_core.shutil, "which", return_value=None):

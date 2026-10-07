@@ -348,7 +348,7 @@ def plugin_can_open(directory, manifest):
     return bool(_PANEL_ROOT_RE.search(text)) or ("function open" in text and "opened" in text)
 
 
-def self_entry():
+def self_entry(in_bar=None):
     """The launcher itself, listed so its own shortcut can be set."""
     return {
         "name": "Simple Launcher",
@@ -364,12 +364,18 @@ def self_entry():
         "desktop_id": f"plugin:{SELF_PLUGIN_ID}",
         "startup_class": "",
         "removable": False,
+        # Its bar button can be taken out of the bar and put back like any widget.
+        "bar_widget": in_bar is not None,
+        "in_bar": bool(in_bar),
+        "openable": False,
     }
 
 
 def parse_plugins():
-    """Enabled shell plugins (widgets, panels, overlays) that can be opened,
-    as list entries shaped like apps, and the launcher itself."""
+    """Shell plugins that have something to open, as list entries shaped
+    like apps, and the launcher itself: enabled panels and overlays, and bar
+    widgets with a panel, in the bar or not (out of it they can be put back).
+    Bar parts with nothing to open (Workspaces, Indicators, …) are left out."""
     if not shutil.which("omarchy-shell"):
         return [self_entry()]
     output = read_bounded_output(["omarchy-shell", "shell", "listPlugins"], max_bytes=512 * 1024, timeout=2)
@@ -378,15 +384,26 @@ def parse_plugins():
     except ValueError:
         return []
     manifests = plugin_manifests()
-    plugins = [self_entry()]
-    for item in listed if isinstance(listed, list) else []:
-        if not isinstance(item, dict) or not item.get("enabled"):
+    listed = listed if isinstance(listed, list) else []
+    own = next((i for i in listed if isinstance(i, dict) and i.get("id") == SELF_PLUGIN_ID), None)
+    plugins = [self_entry(bool(own.get("enabled")) if own else None)]
+    for item in listed:
+        if not isinstance(item, dict):
             continue
         plugin_id = str(item.get("id", ""))
         if not _PLUGIN_ID_RE.match(plugin_id) or plugin_id in INTERNAL_PLUGINS:
             continue
         directory, manifest = manifests.get(plugin_id, (None, None))
-        if manifest is None or not plugin_can_open(directory, manifest):
+        if manifest is None:
+            continue  # Parts built into the bar: nothing to open.
+        kinds = manifest.get("kinds") or []
+        # For a bar widget the shell's "enabled" means: placed in the bar.
+        bar_widget = "bar-widget" in kinds
+        enabled = bool(item.get("enabled"))
+        can_open = plugin_can_open(directory, manifest)
+        # A widget's panel opens from its bar button, so it needs to be in the bar.
+        openable = can_open and (enabled or any(kind in kinds for kind in LOADER_KINDS))
+        if not can_open or not (enabled or bar_widget):
             continue
         description = manifest.get("description")
         plugins.append({
@@ -400,8 +417,28 @@ def parse_plugins():
             "desktop_id": f"plugin:{plugin_id}",
             "startup_class": "",
             "removable": plugin_removable(plugin_id),
+            "bar_widget": bar_widget,
+            "bar_section": (manifest.get("barWidget") or {}).get("defaultSection")
+                           if isinstance(manifest.get("barWidget"), dict) else None,
+            "in_bar": bar_widget and enabled,
+            "openable": openable,
         })
     return sorted(plugins, key=lambda plugin: plugin["name"].lower())
+
+
+BAR_SECTIONS = ("left", "center", "right")
+
+
+def set_in_bar(plugin_id, placed, section=None):
+    """argv that puts a bar widget into a bar section (or its default one)
+    or takes it out, through Omarchy's own commands; None when they are
+    missing or the id or section is not valid."""
+    if not _PLUGIN_ID_RE.match(plugin_id) or (section is not None and section not in BAR_SECTIONS):
+        return None
+    command = "omarchy-plugin-enable" if placed else "omarchy-plugin-disable"
+    if not shutil.which(command):
+        return None
+    return [command, plugin_id, section] if placed and section else [command, plugin_id]
 
 
 USER_PLUGINS_DIR = Path.home() / ".config/omarchy/plugins"
