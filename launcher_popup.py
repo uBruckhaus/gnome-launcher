@@ -625,7 +625,8 @@ class Launcher(Gtk.Application):
         .launcher-card .sc-hint-omarchy {{ color: {omarchy_hex}; }}
         .sc-primary.sc-omarchy-btn {{ background: {omarchy_hex}; color: {colors['background']}; }}
         .launcher-menu-item.uninstall label, .launcher-menu-item.uninstall image {{ color: {error_hex}; }}
-        .launcher-menu-item.uninstall:focus {{ background: alpha({error_hex}, 0.18); }}
+        .launcher-menu-item.uninstall:focus {{ background: {error_hex}; }}
+        .launcher-menu-item.uninstall:focus label, .launcher-menu-item.uninstall:focus image {{ color: #ffffff; }}
         .sc-other {{ font-size: 11px; border-radius: {radius}px; padding: 3px 8px; min-height: 0;
             background: alpha({colors['foreground']}, 0.06); border: 1px solid alpha({colors['foreground']}, 0.18); }}
         .launcher-card button.sc-other {{ background: transparent; border: 1px solid; }}
@@ -1511,6 +1512,7 @@ class Launcher(Gtk.Application):
         buttons.set_halign(Gtk.Align.END)
         if browser:
             close = Gtk.Button(label="Close")
+            self.focus_follows_pointer(close)
             close.add_css_class("sc-small")
             close.connect("clicked", lambda *_: popover.popdown())
             buttons.append(close)
@@ -1519,10 +1521,12 @@ class Launcher(Gtk.Application):
             close.grab_focus()
             return
         cancel = Gtk.Button(label="Cancel")
+        self.focus_follows_pointer(cancel)
         cancel.add_css_class("sc-small")
         cancel.connect("clicked", lambda *_: popover.popdown())
         buttons.append(cancel)
         confirm = Gtk.Button(label="Uninstall")
+        self.focus_follows_pointer(confirm)
         confirm.add_css_class("sc-primary")
         confirm.add_css_class("sc-danger-btn")
         confirm.connect("clicked", lambda *_: (popover.popdown(), self.uninstall_plugin(app)
