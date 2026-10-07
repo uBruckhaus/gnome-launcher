@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "Simple Launcher",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Fast, theme-aware launcher for Omarchy apps, widgets, plugins and tray apps, with an advanced shortcut editor: bind keys or two-step sequences to apps, their actions or tray menu entries, see who owns every key and rebind any of them in one click.",
+  "description": "Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list. See who owns every key, rebind it in one click, or use two-step shortcuts.",
   "homepage": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "repository": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "keywords": [

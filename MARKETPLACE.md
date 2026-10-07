@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.4.0`
+- **Version**: `1.4.1`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -20,7 +20,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 🏷️ Short Description (Tagline)
 
-> Fast, theme-aware launcher for Omarchy apps, widgets, plugins and tray apps, with an advanced shortcut editor: bind keys or two-step sequences to apps, their actions or tray menu entries, see who owns every key, and rebind any of them in one click.
+> Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list. See who owns every key, rebind it in one click, or use two-step shortcuts.
 
 ---
 
