@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Simple Launcher`
-- **Version**: `1.6.0`
+- **Version**: `1.6.1`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -30,7 +30,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
 
-**New in 1.6 — tidier uninstalls and menus.** Shortcuts of uninstalled apps are cleaned up right away; hand-written ones in your own Hyprland files are only deleted after you answer **Delete** (with a backup), **Keep** is remembered. App menus open on their first entry, the mouse moves the same single highlight the keyboard uses, and Left closes a menu. **Uninstall…** is quieter, focuses its button, reports failures, and for browser web apps (Chrome, Brave, Edge, …) explains how to remove them in the browser. The list keeps a steady height, the search stays when switching between apps and widgets, and the shortcut page shows an `Esc` hint next to its back arrow.
+**New in 1.6 — tidier uninstalls and menus.** Shortcuts of uninstalled apps are cleaned up right away; hand-written ones in your own Hyprland files are only deleted after you answer **Delete** (with a backup), **Keep** is remembered. App menus open on their first entry, the mouse moves the same single highlight the keyboard uses, and Left or Backspace closes a menu. **Uninstall…** is quieter, focuses its button, reports failures, and for browser web apps (Chrome, Brave, Edge, …) explains how to remove them in the browser. The list keeps a steady height, the search stays when switching between apps and widgets, and the shortcut page shows an `Esc` hint next to its back arrow.
 
 **New in 1.5 — the bar from the widget list.** Widgets in the bar have **Remove from bar**; widgets taken out of it move to the hidden list (the eye shows them) with **Add to bar ›**, which asks for the section — Left, Center or Right — using Omarchy's own `omarchy plugin enable/disable`. Only plugins with something to open are listed; bar parts like Workspaces or Indicators are left out.
 

@@ -1249,6 +1249,7 @@ class Launcher(Gtk.Application):
         popover.connect("closed", self.on_actions_closed)
         # Right opens the menu, Left closes it again: on a menu item only, so
         # Left still moves between the buttons of the uninstall question.
+        # Backspace closes it from anywhere in the menu.
         keys = Gtk.EventControllerKey()
         keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         keys.connect("key-pressed", lambda _c, key, _code, _state: self.close_actions_on_left(popover, key))
@@ -1257,9 +1258,12 @@ class Launcher(Gtk.Application):
         popover.popup()
 
     def close_actions_on_left(self, popover, key):
+        focus = self.window.get_focus()
+        if key == Gdk.KEY_BackSpace and not isinstance(focus, Gtk.Editable):
+            popover.popdown()
+            return True
         if key not in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
             return False
-        focus = self.window.get_focus()
         if focus is None or not focus.has_css_class("launcher-menu-item"):
             return False
         popover.popdown()

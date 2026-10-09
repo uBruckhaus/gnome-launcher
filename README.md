@@ -4,7 +4,7 @@ Fast, theme-aware application launcher popup and bar widget for [Omarchy](https:
 
 ![Simple Launcher](preview.png)
 
-**New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
+**New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left or Backspace closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
 
 **New in 1.5:** put widgets into the bar (left, center or right) or take them out, right from the widget list.
 
@@ -144,7 +144,7 @@ Shortcuts are stored in `~/.config/applauncher/shortcuts.json` and written to `~
 | `Page Up` / `Page Down` | Jump selection by 6 items |
 | `Home` / `End` | Jump to start / end of list |
 | `Return` / `Enter` | Launch selected application |
-| `Backspace` | Erase search character |
+| `Backspace` | Close the actions menu, or erase a search character |
 | `Escape` | Clear search query, or close launcher if search is empty |
 | `Right Arrow` | Open context actions menu (for apps with desktop actions) |
 | `Delete` | Close active instance of the selected app |
