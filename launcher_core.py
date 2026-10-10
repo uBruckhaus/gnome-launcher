@@ -372,7 +372,7 @@ def plugin_can_open(directory, manifest):
 def self_entry(in_bar=None):
     """The launcher itself, listed so its own shortcut can be set."""
     return {
-        "name": "Simple Launcher",
+        "name": "Launch & Bind",
         "plugin_id": SELF_PLUGIN_ID,
         "self_launcher": True,
         "exec": str(Path(__file__).resolve().parent / "launcher-toggle"),

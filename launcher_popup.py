@@ -243,7 +243,7 @@ class Launcher(Gtk.Application):
     def build_window(self):
         window = Gtk.ApplicationWindow(application=self)
         window.set_decorated(False)
-        window.set_title("Simple Launcher")
+        window.set_title("Launch & Bind")
         window.set_name("launcher-window")
         Gtk4LayerShell.init_for_window(window)
         Gtk4LayerShell.set_namespace(window, "simple-launcher-for-fools")
@@ -1681,7 +1681,7 @@ class Launcher(Gtk.Application):
         # Names come from apps, plugins and tray menus; notification daemons
         # render markup, so none of it may reach them as markup.
         try:
-            subprocess.Popen(["notify-send", "-a", "Simple Launcher", plain_text(title), plain_text(body)],
+            subprocess.Popen(["notify-send", "-a", "Launch & Bind", plain_text(title), plain_text(body)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             pass

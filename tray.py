@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Simple Launcher - tray icons (StatusNotifierItem) and their menus.
+"""Launch & Bind - tray icons (StatusNotifierItem) and their menus.
 
 Used by the launcher's widget list, and as a command for shortcuts:
 

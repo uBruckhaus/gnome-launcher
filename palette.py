@@ -1,4 +1,4 @@
-"""Simple Launcher - Theme colors from Omarchy."""
+"""Launch & Bind - Theme colors from Omarchy."""
 
 from pathlib import Path
 import tomllib

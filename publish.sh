@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Automated Publisher for Simple Launcher
+# Automated Publisher for Launch & Bind
 set -e
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 cd "$DIR"
 
-echo "=== Simple Launcher: Marketplace Publisher ==="
+echo "=== Launch & Bind: Marketplace Publisher ==="
 
 # Check gh authentication
 if ! gh auth status >/dev/null 2>&1; then
@@ -70,7 +70,7 @@ EOF
 echo "Submitting to omacom/omarchy-plugin-marketplace..."
 ISSUE_URL="$(gh issue create \
     --repo omacom/omarchy-plugin-marketplace \
-    --title "[Plugin]: Simple Launcher" \
+    --title "[Plugin]: Launch & Bind" \
     --body-file "$SUBMISSION_FILE")"
 
 rm -f "$SUBMISSION_FILE"

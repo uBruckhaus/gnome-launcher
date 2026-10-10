@@ -61,10 +61,10 @@ class LauncherShortcutTests(unittest.TestCase):
         self.assertEqual(launch, [shortcuts.SELF_TOGGLE])
         self.assertTrue(Path(launch[0]).is_file())
         self.assertFalse(shortcuts.launch_target_missing(launch))
-        state = {"apps": {entry["desktop_id"]: {"name": "Simple Launcher", "launch": launch, "disabled": [],
+        state = {"apps": {entry["desktop_id"]: {"name": "Launch & Bind", "launch": launch, "disabled": [],
                  "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "space", "replaces": "", "action": ""}]}}}
         lua = shortcuts.render_lua(state)
-        self.assertIn(f'o.bind("SUPER + ALT + space", "Simple Launcher", "{shortcuts.SELF_TOGGLE}")', lua)
+        self.assertIn(f'o.bind("SUPER + ALT + space", "Launch & Bind", "{shortcuts.SELF_TOGGLE}")', lua)
         self.assertNotIn("uwsm-app", lua)
 
     def test_launcher_list_shortcuts_pass_the_list(self):
@@ -72,7 +72,7 @@ class LauncherShortcutTests(unittest.TestCase):
         self.assertEqual([a["id"] for a in entry["actions"]], ["apps", "plugins"])
         launch = shortcuts.app_launch_argv(entry)
         self.assertEqual(shortcuts.shortcut_launch(launch, "plugins"), [shortcuts.SELF_TOGGLE, "plugins"])
-        state = {"apps": {entry["desktop_id"]: {"name": "Simple Launcher", "launch": launch, "disabled": [],
+        state = {"apps": {entry["desktop_id"]: {"name": "Launch & Bind", "launch": launch, "disabled": [],
                  "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "W", "replaces": "", "action": "plugins"}]}}}
         self.assertIn(f'"{shortcuts.SELF_TOGGLE} plugins")', shortcuts.render_lua(state))
 
@@ -163,7 +163,7 @@ class PluginDiscoveryTests(unittest.TestCase):
 
     def test_parse_plugins_without_shell_lists_only_the_launcher(self):
         with mock.patch.object(launcher_core.shutil, "which", return_value=None):
-            self.assertEqual([p["name"] for p in launcher_core.parse_plugins()], ["Simple Launcher"])
+            self.assertEqual([p["name"] for p in launcher_core.parse_plugins()], ["Launch & Bind"])
 
     def test_open_plugin_reports_shell_answer(self):
         read = mock.Mock(return_value="unknown\n")

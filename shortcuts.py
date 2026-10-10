@@ -1,4 +1,4 @@
-"""Simple Launcher - global app shortcuts managed through Hyprland.
+"""Launch & Bind - global app shortcuts managed through Hyprland.
 
 Shortcuts are stored in ~/.config/applauncher/shortcuts.json and rendered to
 ~/.config/hypr/simple-launcher-shortcuts.lua, which hyprland.lua requires last
@@ -893,7 +893,7 @@ def submap_name(first):
 
 
 def render_lua(state):
-    lines = ["-- Managed by Simple Launcher (ubruckhaus.simple-launcher-for-fools).",
+    lines = ["-- Managed by Launch & Bind (ubruckhaus.simple-launcher-for-fools).",
              "-- Edit shortcuts from the launcher; manual changes here are overwritten.", ""]
     sequences = {}  # first step id -> (first step, [(entry, combo, command)])
     for app_id in sorted(state["apps"], key=lambda k: state["apps"][k]["name"].casefold()):
@@ -943,7 +943,7 @@ def render_lua(state):
         lines.append("end)")
         summary = ", ".join(f"{key_label(c['then'])} {e['name']}" for e, c, _l in items)
         lines.append(f"hl.bind({lua_string(combo_string(first))}, hl.dsp.submap({lua_string(name)}), "
-                     f"{{ description = {lua_string(('Simple Launcher, then: ' + summary)[:160])} }})")
+                     f"{{ description = {lua_string(('Launch & Bind, then: ' + summary)[:160])} }})")
         lines.append("")
     return "\n".join(lines)
 
@@ -961,7 +961,7 @@ def ensure_required():
         shutil.copy2(HYPR_MAIN, backup)
     suffix = "" if text.endswith("\n") else "\n"
     _atomic_write(HYPR_MAIN, text + suffix +
-                  "\n-- Simple Launcher app shortcuts (keep last so they override defaults)\n"
+                  "\n-- Launch & Bind app shortcuts (keep last so they override defaults)\n"
                   + REQUIRE_LINE + "\n")
 
 

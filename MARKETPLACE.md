@@ -1,14 +1,14 @@
-# Marketplace Publication Listing: Simple Launcher
+# Marketplace Publication Listing: Launch & Bind
 
-This document contains the ready-to-use copy, metadata, and feature breakdown for submitting **Simple Launcher** to the [Omarchy Plugin Marketplace](https://plugins.omarchy.org) and `omacom/omarchy-plugin-marketplace`.
+This document contains the ready-to-use copy, metadata, and feature breakdown for submitting **Launch & Bind** to the [Omarchy Plugin Marketplace](https://plugins.omarchy.org) and `omacom/omarchy-plugin-marketplace`.
 
 ---
 
 ## 📋 Marketplace Metadata Sheet
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
-- **Display Name**: `Simple Launcher`
-- **Version**: `1.6.1`
+- **Display Name**: `Launch & Bind`
+- **Version**: `1.6.2`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -26,7 +26,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 ## 📝 Full Marketplace Description
 
-**Simple Launcher** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
+**Launch & Bind** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
 
@@ -42,7 +42,7 @@ Whether summoned with a click on the status bar or via a global Hyprland keybind
 - **Quit background apps**: apps running in the tray or background get **Quit** next to **Close**, using the app's own tray Quit for a clean exit.
 - **Two-step shortcuts**: `Super + Alt + Space`, then `N`. Several shortcuts can share the first step; the letters show which second keys are free. Built on a Hyprland submap; any other key cancels.
 - **Just press the keys**: while the shortcut page is open, every combo reaches it — even ones Omarchy already uses — and a combo followed quickly by a single key becomes a two-step shortcut. Clicking a picked key again clears it.
-- **Keys for the launcher itself**: Simple Launcher is in the widget list, with **Show apps** and **Show widgets & plugins** — give each list its own key.
+- **Keys for the launcher itself**: Launch & Bind is in the widget list, with **Show apps** and **Show widgets & plugins** — give each list its own key.
 
 **New in 1.3.5 — tidier shortcut editor.** The shortcut page has no visible scrollbar, uses the same edge gaps as the app list, and the Assign button sits beside the key being defined instead of below all keys.
 
@@ -56,7 +56,7 @@ Whether summoned with a click on the status bar or via a global Hyprland keybind
 
 New in 1.2: Omarchy's default app shortcuts show up on their apps, every app's shortcut is shown as a badge in the list, terminal apps like `foot -e claude` are tracked as their own app, and the running badge sits on the app icon.
 
-New in 1.1: give any app its own global Hyprland shortcut straight from the launcher. Pick modifiers, press a key or click a free one, and Simple Launcher tells you whether the combination is free, already one of your own bindings, or an Omarchy default — before anything changes.
+New in 1.1: give any app its own global Hyprland shortcut straight from the launcher. Pick modifiers, press a key or click a free one, and Launch & Bind tells you whether the combination is free, already one of your own bindings, or an Omarchy default — before anything changes.
 
 ---
 

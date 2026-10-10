@@ -1,8 +1,10 @@
-# Simple Launcher
+# Launch & Bind
 
 Fast, theme-aware application launcher popup and bar widget for [Omarchy](https://omarchy.org) — with an advanced shortcut editor: bind keys to apps **or their actions**, see who owns every key, and rebind any of them in one click.
 
-![Simple Launcher](preview.png)
+![Launch & Bind](preview.png)
+
+**New in 1.6.2:** Simple Launcher is now called **Launch & Bind**, because it does much more than launch apps. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
 
 **New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left or Backspace closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
 
@@ -22,7 +24,7 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 
 ## Changes in 1.5.0
 
-**Bar placement from the widget list.** Every widget with something to open is listed, in the bar or not. Bar parts with nothing to open — Workspaces, System tray, Indicators, Keyboard layout, or widgets like Simple Recipes whose icon only runs a command — are not listed at all. A widget's `☰` menu has **Remove from bar** or **Add to bar ›**, which asks for the section — **Left**, **Center** or **Right**, the widget's own default marked (Omarchy's `omarchy plugin disable` / `enable <id> <section>`); widgets that are not in the bar count as hidden: they show (dimmed, marked *Not in bar*) only while the eye shows hidden entries, so a removed widget leaves the list and comes back with **Add to bar**. Simple Launcher's own entry always stays. A widget out of the bar has no **Open** and no **Shortcut…** until it is back, because its panel opens from its bar button. **Hide from list** stays separate: it only hides the entry in the launcher.
+**Bar placement from the widget list.** Every widget with something to open is listed, in the bar or not. Bar parts with nothing to open — Workspaces, System tray, Indicators, Keyboard layout, or widgets like Simple Recipes whose icon only runs a command — are not listed at all. A widget's `☰` menu has **Remove from bar** or **Add to bar ›**, which asks for the section — **Left**, **Center** or **Right**, the widget's own default marked (Omarchy's `omarchy plugin disable` / `enable <id> <section>`); widgets that are not in the bar count as hidden: they show (dimmed, marked *Not in bar*) only while the eye shows hidden entries, so a removed widget leaves the list and comes back with **Add to bar**. Launch & Bind's own entry always stays. A widget out of the bar has no **Open** and no **Shortcut…** until it is back, because its panel opens from its bar button. **Hide from list** stays separate: it only hides the entry in the launcher.
 
 ## Changes in 1.4.1
 
@@ -44,7 +46,7 @@ New plugins show up in the open list on their own, like newly installed apps: th
 
 **Two-step shortcuts**: tick **Two steps** on the shortcut page, choose the first combo (e.g. `Super + Alt + Space`), then the second key on its own (e.g. `N`) — press it or click a letter; a second click clears it, like every key button. Several shortcuts can share a first combo, each with its own second key; the letters show which second keys are free. The first combo enters a Hyprland submap where the second key runs the shortcut and any other key cancels. A first combo cannot open anything by itself, so it conflicts with one-step shortcuts on the same keys (shown and rebindable like any other conflict).
 
-**Simple Launcher** itself is in the widget list too: Enter or **Shortcut…** opens its shortcut page, so the keys that open the launcher are set the same way as any app's.
+**Launch & Bind** itself is in the widget list too: Enter or **Shortcut…** opens its shortcut page, so the keys that open the launcher are set the same way as any app's.
 
 Its `☰` menu has **Show apps** and **Show widgets & plugins**, and on the shortcut page **Opens** offers the same choice, so each list can get its own key (e.g. `Super + Alt + A` for apps, `Super + Alt + W` for widgets). Such a key opens the launcher on that list, switches an open launcher over to it, and closes it when that list is already showing. By hand: `launcher-toggle apps` or `launcher-toggle plugins`.
 
@@ -104,12 +106,12 @@ Or install locally:
 
 ## Keybindings (Optional)
 
-The easiest way: switch to **Widgets & Plugins** (`Tab`), select **Simple Launcher** and press Enter (or `☰` → **Shortcut…**). Assign one or more keys there; a binding you already wrote by hand shows up too and can be changed or turned off like any other.
+The easiest way: switch to **Widgets & Plugins** (`Tab`), select **Launch & Bind** and press Enter (or `☰` → **Shortcut…**). Assign one or more keys there; a binding you already wrote by hand shows up too and can be changed or turned off like any other.
 
 To bind it by hand instead (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER, SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
+o.bind("SUPER, SPACE", "Launch & Bind", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
 
 `launcher-toggle apps` and `launcher-toggle plugins` open a specific list.
@@ -117,7 +119,7 @@ o.bind("SUPER, SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.
 Or for `SUPER + CTRL + ALT + SPACE`:
 
 ```lua
-o.bind("SUPER + CTRL + ALT + SPACE", "Simple Launcher", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
+o.bind("SUPER + CTRL + ALT + SPACE", "Launch & Bind", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
 
 ## App Shortcuts
