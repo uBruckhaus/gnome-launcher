@@ -217,6 +217,169 @@ def read_bounded_output(command, max_bytes=64 * 1024, timeout=1, binary=False):
 
 MAX_APPIMAGE_ICON_BYTES = 1024 * 1024
 
+# Icon files come from .desktop files, AppImages and tray peers (via their
+# IconThemePath), so none of them is decoded on trust. The declared size is
+# read from the header first: a tiny PNG can declare a canvas that the image
+# loaders would allocate in full before scaling it down to 32 px.
+MAX_ICON_FILE_BYTES = 4 * 1024 * 1024
+MAX_SVG_ICON_BYTES = 1024 * 1024
+MAX_ICON_SIDE = 4096
+MAX_ICON_PIXELS = 4096 * 4096        # width × height × frames
+
+
+def _image_header_size(handle):
+    """``(width, height, frames)`` from a PNG/JPEG/GIF/WebP/BMP header,
+    reading only headers and block lengths, never pixel data; else None."""
+    head = handle.read(32)
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        if head[12:16] != b"IHDR":
+            return None
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big"), 1
+    if head[:3] == b"\xff\xd8\xff":
+        return _jpeg_size(handle)
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return _gif_size(handle, head)
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return _webp_size(handle)
+    if head[:2] == b"BM" and len(head) >= 26:
+        if int.from_bytes(head[14:18], "little") == 12:   # OS/2 core header
+            return int.from_bytes(head[18:20], "little"), int.from_bytes(head[20:22], "little"), 1
+        width = int.from_bytes(head[18:22], "little", signed=True)
+        height = int.from_bytes(head[22:26], "little", signed=True)
+        return abs(width), abs(height), 1
+    return None
+
+
+def _jpeg_size(handle):
+    handle.seek(2)
+    for _ in range(10000):   # segments are walked by length, never scanned
+        if handle.read(1) != b"\xff":
+            return None
+        marker = handle.read(1)
+        while marker == b"\xff":
+            marker = handle.read(1)
+        if not marker:
+            return None
+        code = marker[0]
+        if code == 0x01 or 0xD0 <= code <= 0xD7:
+            continue
+        if code in (0xD9, 0xDA):   # no frame header before the scan
+            return None
+        length = int.from_bytes(handle.read(2), "big")
+        if length < 2:
+            return None
+        if 0xC0 <= code <= 0xCF and code not in (0xC4, 0xC8, 0xCC):
+            data = handle.read(5)
+            if len(data) < 5:
+                return None
+            return int.from_bytes(data[3:5], "big"), int.from_bytes(data[1:3], "big"), 1
+        handle.seek(length - 2, 1)
+    return None
+
+
+def _gif_size(handle, head):
+    width = int.from_bytes(head[6:8], "little")
+    height = int.from_bytes(head[8:10], "little")
+    pos = 13
+    if head[10] & 0x80:
+        pos += 3 << ((head[10] & 0x07) + 1)
+    handle.seek(pos)
+    frames = 0
+
+    def skip_sub_blocks():
+        while True:
+            size = handle.read(1)
+            if not size:
+                return False
+            if size[0] == 0:
+                return True
+            handle.seek(size[0], 1)
+
+    while True:
+        block = handle.read(1)
+        if block == b"\x2c":
+            desc = handle.read(9)
+            if len(desc) < 9:
+                break
+            frames += 1
+            width = max(width, int.from_bytes(desc[0:2], "little") + int.from_bytes(desc[4:6], "little"))
+            height = max(height, int.from_bytes(desc[2:4], "little") + int.from_bytes(desc[6:8], "little"))
+            if desc[8] & 0x80:
+                handle.seek(3 << ((desc[8] & 0x07) + 1), 1)
+            handle.read(1)
+            if not skip_sub_blocks():
+                break
+            if width * height * frames > MAX_ICON_PIXELS:
+                break
+        elif block == b"\x21":
+            handle.read(1)
+            if not skip_sub_blocks():
+                break
+        else:
+            break
+    return (width, height, frames) if frames else None
+
+
+def _webp_size(handle):
+    handle.seek(12)
+    size = None
+    frames = 0
+    for _ in range(100000):
+        header = handle.read(8)
+        if len(header) < 8:
+            break
+        kind, length = header[:4], int.from_bytes(header[4:8], "little")
+        data = handle.read(min(length, 10))
+        if kind == b"VP8X" and len(data) >= 10:
+            size = (1 + int.from_bytes(data[4:7], "little"), 1 + int.from_bytes(data[7:10], "little"))
+        elif kind == b"VP8 " and len(data) >= 10 and size is None:
+            size = (int.from_bytes(data[6:8], "little") & 0x3FFF,
+                    int.from_bytes(data[8:10], "little") & 0x3FFF)
+        elif kind == b"VP8L" and len(data) >= 5 and size is None:
+            bits = int.from_bytes(data[1:5], "little")
+            size = (1 + (bits & 0x3FFF), 1 + ((bits >> 14) & 0x3FFF))
+        elif kind == b"ANMF":
+            frames += 1
+            if size and size[0] * size[1] * frames > MAX_ICON_PIXELS:
+                break
+        handle.seek(length + (length & 1) - len(data), 1)
+    return (size[0], size[1], max(frames, 1)) if size else None
+
+
+def icon_bytes(path):
+    """The bytes of an icon file that is safe to decode, else None.
+
+    The file is read once with a byte cap, and the size check runs on those
+    same bytes, so nothing can swap the file between check and decode. SVG
+    is vector data the caller renders straight at icon size; raster formats
+    must declare at most MAX_ICON_SIDE per side and MAX_ICON_PIXELS in total
+    (all frames). Other formats (XPM, ICO, ...) are not loaded from files."""
+    path = Path(path)
+    is_svg = path.suffix.lower() in (".svg", ".svgz")
+    cap = MAX_SVG_ICON_BYTES if is_svg else MAX_ICON_FILE_BYTES
+    try:
+        with open(path, "rb") as handle:
+            data = handle.read(cap + 1)
+    except OSError:
+        return None
+    if not data or len(data) > cap:
+        return None
+    if is_svg:
+        return data
+    import io
+    try:
+        size = _image_header_size(io.BytesIO(data))
+    except (ValueError, IndexError):
+        return None
+    if size is None:
+        return None
+    width, height, frames = size
+    if not width or not height or width > MAX_ICON_SIDE or height > MAX_ICON_SIDE \
+            or width * height * frames > MAX_ICON_PIXELS:
+        return None
+    return data
+
+
 
 def cache_appimage_icon(path, raw_icon, cache_dir):
     """Extract to a bounded pipe, never let the archive tool write files."""

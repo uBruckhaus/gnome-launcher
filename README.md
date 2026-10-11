@@ -82,6 +82,8 @@ Open app menus survive background running-status updates, app-directory refreshe
 
 Standalone AppImage metadata is limited to 64 KiB. Icons are extracted through a bounded pipe with a 1 MiB limit before being saved atomically in the cache. Oversized, timed-out, or failed icon extractions use the generic application icon. The archive extractor never writes icons directly to disk.
 
+Icon files are never decoded on trust, whether they come from a `.desktop` file, an AppImage or a tray icon's `IconThemePath`. Each file is read once (at most 4 MiB, SVG 1 MiB). Its declared size is checked from the header on those same bytes: PNG, JPEG, GIF and WebP may declare at most 4096 px per side and 4096×4096 pixels including all animation frames. Only then is it decoded, scaled to 64 px while loading; SVG is rendered at that size directly. Anything else (oversized, malformed, XPM, ICO) shows the themed icon instead. Decoded icons are cached by path, modification time and size.
+
 Desktop entries launch through `uwsm-app` or Gio using the original desktop file. If native launching fails, the launcher reports failure; it never executes the entry’s `Exec` text through a shell.
 
 ## Installation

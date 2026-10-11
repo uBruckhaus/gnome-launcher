@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Launch & Bind`
-- **Version**: `1.6.2`
+- **Version**: `1.6.3`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`

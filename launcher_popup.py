@@ -23,7 +23,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Gtk4LayerShell", "1.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Gtk4LayerShell
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Gtk4LayerShell
 
 # Once Gtk4LayerShell is loaded into this process by ld.so, remove it from
 # LD_PRELOAD so child processes and launched applications (like Steam / pressure-vessel)
@@ -44,6 +45,7 @@ from launcher_core import (
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     launch_action, launch_app, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
+    icon_bytes,
 )
 from palette import ThemePalette
 import pidfile
@@ -56,6 +58,49 @@ LIST_HEIGHT = 590
 # Where each browser lists its installed web apps.
 APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
               "Edge": "edge://apps", "Vivaldi": "vivaldi://apps"}
+
+
+ICON_DECODE_SIZE = 64          # twice the 32 px rows, for HiDPI
+_icon_cache = {}               # (path, mtime_ns, size) -> Gdk.Texture or None
+
+
+def icon_texture(path):
+    """A small texture for an icon file, or None to use the themed icon.
+
+    `icon_bytes` reads the file once under a byte cap and refuses headers
+    that declare an oversized canvas; the loader then scales to
+    ICON_DECODE_SIZE as it decodes (SVG is rendered at that size directly).
+    Results are cached, so rebuilding the list never decodes again."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    if key in _icon_cache:
+        return _icon_cache[key]
+    texture = None
+    data = icon_bytes(path)
+    if data is not None:
+        def fit(loader, width, height):
+            scale = min(1.0, ICON_DECODE_SIZE / max(width, height, 1))
+            loader.set_size(max(1, round(width * scale)), max(1, round(height * scale)))
+
+        loader = GdkPixbuf.PixbufLoader()
+        loader.connect("size-prepared", fit)
+        try:
+            loader.write(data)
+            loader.close()
+            pixbuf = loader.get_pixbuf()
+            texture = Gdk.Texture.new_for_pixbuf(pixbuf) if pixbuf is not None else None
+        except GLib.Error:
+            try:
+                loader.close()
+            except GLib.Error:
+                pass
+    if len(_icon_cache) > 512:
+        _icon_cache.clear()
+    _icon_cache[key] = texture
+    return texture
 
 
 def write_pid_file():
@@ -1038,7 +1083,8 @@ class Launcher(Gtk.Application):
             icon_name = app.get("icon") or "application-x-executable"
             image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
             themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
-            icon = Gtk.Image.new_from_file(icon_name) if Path(icon_name).is_file() else Gtk.Image.new_from_icon_name(themed_name)
+            texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
+            icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
             icon.set_pixel_size(32)
             icon.set_valign(Gtk.Align.CENTER)
             if is_hidden:
