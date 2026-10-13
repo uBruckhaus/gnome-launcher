@@ -11,12 +11,12 @@ class ActionsMenuTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / "launcher_popup.py"
         tree = ast.parse(source.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Launcher")
-        names = {"actions_menu_open", "on_actions_closed", "poll", "hide_if_inactive", "reload_apps", "on_key"}
+        names = {"actions_menu_open", "on_actions_closed", "poll", "hide_if_inactive", "reload_apps", "on_key", "settings_open"}
         cls.bases = []
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.glib = SimpleNamespace(SOURCE_REMOVE=False, SOURCE_CONTINUE=True,
                                     idle_add=Mock(), timeout_add=Mock(return_value=123))
-        namespace = {"GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27)}
+        namespace = {"GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8)}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
         self.app = namespace["Launcher"]()
         self.menu = Mock()
@@ -33,6 +33,8 @@ class ActionsMenuTests(unittest.TestCase):
         self.app.hide = Mock()
         self.app.shortcut_app = None
         self.app.mode = "apps"
+        self.app.stack = Mock()
+        self.app.stack.get_visible_child_name.return_value = "list"
 
     def test_status_refresh_resumes_after_menu_closes(self):
         self.app.poll()
@@ -74,6 +76,14 @@ class ActionsMenuTests(unittest.TestCase):
         cleanup()
         self.menu.unparent.assert_called_once()
 
+
+    def test_escape_and_backspace_leave_the_settings_page(self):
+        self.app.stack.get_visible_child_name.return_value = "settings"
+        self.app.close_settings_page = Mock()
+        self.assertTrue(self.app.on_key(None, 27, 0, 0))
+        self.assertTrue(self.app.on_key(None, 8, 0, 0))
+        self.assertEqual(self.app.close_settings_page.call_count, 2)
+        self.app.hide.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main()

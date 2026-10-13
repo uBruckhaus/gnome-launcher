@@ -1,4 +1,5 @@
 import os
+import ctypes
 import hashlib
 import tempfile
 import json
@@ -13,10 +14,57 @@ import time
 import urllib.parse
 from pathlib import Path
 import gi
+import i18n
+from i18n import _, ngettext
+
+# The interface language is stored next to the launcher's other files.
+i18n.SETTINGS_FILE = Path.home() / ".config/applauncher/settings.json"
 gi.require_version('GioUnix', '2.0')
 from gi.repository import GioUnix
 
 HIDDEN_FILE = Path.home() / ".config/applauncher/hidden.json"
+SETTINGS_FILE = i18n.SETTINGS_FILE
+
+
+def _load_settings(path=None):
+    path = Path(path or SETTINGS_FILE)
+    try:
+        with open(path, "rb") as fh:
+            data = json.loads(fh.read(64 * 1024) or b"{}")
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_setting(key, value, path=None):
+    """Set one key in settings.json (atomic, private), keeping the others."""
+    path = Path(path or SETTINGS_FILE)
+    data = _load_settings(path)
+    data[key] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def admin_action_enabled(path=None):
+    """'Open as administrator' in the app menu is opt-in (Settings)."""
+    return _load_settings(path).get("admin_action") is True
+
+
+def set_admin_action(enabled, path=None):
+    _save_setting("admin_action", bool(enabled), path)
 HIDDEN_PLUGINS_FILE = Path.home() / ".config/applauncher/hidden-plugins.json"
 
 
@@ -87,7 +135,7 @@ def browser_web_app(app):
         return None
     if not argv or not any(a.startswith("--app-id=") for a in argv):
         return None
-    return WEB_APP_BROWSERS.get(Path(argv[0]).name, "the browser")
+    return WEB_APP_BROWSERS.get(Path(argv[0]).name, _("the browser"))
 
 
 def executable_exists(command):
@@ -166,6 +214,9 @@ def parse_desktop_files():
             apps.append({"name": name, "exec": command, "icon": values.get("Icon", ""),
                          "desktop_path": str(path), "actions": actions,
                          "description": desc,
+                         "terminal": values.get("Terminal", "").strip().lower() in ("true", "1"),
+                         "sandboxed": bool(values.get("X-Flatpak") or values.get("X-SnapInstanceName")),
+                         "pwa": is_pwa(values),
                          "desktop_id": path.stem, "startup_class": values.get("StartupWMClass", "")})
 
     apps.extend(scan_standalone_appimages(seen_names))
@@ -542,9 +593,9 @@ def self_entry(in_bar=None):
         "icon": "view-app-grid-symbolic",
         "desktop_path": "",
         # Each list can have its own shortcut: `launcher-toggle apps|plugins`.
-        "actions": [{"id": "apps", "name": "Show apps", "exec": ""},
-                    {"id": "plugins", "name": "Show widgets & plugins", "exec": ""}],
-        "description": "This launcher — set the keys that open it",
+        "actions": [{"id": "apps", "name": _("Show apps"), "exec": ""},
+                    {"id": "plugins", "name": _("Show widgets & plugins"), "exec": ""}],
+        "description": _("This launcher — set the keys that open it"),
         "desktop_id": f"plugin:{SELF_PLUGIN_ID}",
         "startup_class": "",
         "removable": False,
@@ -650,24 +701,24 @@ def plugin_removal_note(plugin_id):
     would be lost: it deletes git checkouts outright."""
     target = USER_PLUGINS_DIR / plugin_id
     if target.is_symlink():
-        return "Only the link is removed; the folder it points to stays.", False
+        return _("Only the link is removed; the folder it points to stays."), False
     if not (target / ".git").is_dir():
-        return "The folder is kept as a backup in ~/.config/omarchy/plugins.", False
+        return _("The folder is kept as a backup in ~/.config/omarchy/plugins."), False
     lost = []
     changed = _git_count(target, "status", "--porcelain")
     if changed is None:
-        lost.append("its git state could not be checked")
+        lost.append(_("its git state could not be checked"))
     elif changed.strip():
         count = len(changed.strip().splitlines())
-        lost.append(f"{count} changed file{'s' if count != 1 else ''}")
+        lost.append(ngettext("{0} changed file", "{0} changed files", count).format(count))
     ahead = _git_count(target, "rev-list", "--count", "@{u}..HEAD")
     if ahead is None:
-        lost.append("commits that exist nowhere else (no upstream)")
+        lost.append(_("commits that exist nowhere else (no upstream)"))
     elif ahead.strip() not in ("", "0"):
-        lost.append(f"{ahead.strip()} unpushed commit{'s' if ahead.strip() != '1' else ''}")
+        lost.append(ngettext("{0} unpushed commit", "{0} unpushed commits", int(ahead.strip())).format(ahead.strip()))
     if lost:
-        return "The folder is deleted, including " + " and ".join(lost) + ".", True
-    return "The folder is deleted; it can be installed again from the marketplace.", False
+        return _("The folder is deleted, including {0}.").format(_(" and ").join(lost)), True
+    return _("The folder is deleted; it can be installed again from the marketplace."), False
 
 
 def open_plugin(plugin):
@@ -1004,3 +1055,259 @@ def launch_action(app, action_id):
         except Exception:
             pass
     return False
+
+
+# What a root process needs to open a window on this session. WAYLAND_DISPLAY
+# becomes an absolute socket path, so the user's XDG_RUNTIME_DIR is not handed
+# to root (root-owned files there would break the user's own session).
+# XDG_SESSION_TYPE makes toolkits pick Wayland: root has no access to the
+# session's Xwayland, so an app that falls back to X11 cannot open a window.
+ADMIN_DISPLAY_VARS = ("XDG_SESSION_TYPE", "DISPLAY", "XAUTHORITY")
+# How the user's apps look: scale, cursor and toolkit themes. Root has none of
+# the user's settings, so without these its windows come up tiny and light.
+ADMIN_LOOK_VARS = ("GDK_SCALE", "GDK_DPI_SCALE", "QT_SCALE_FACTOR", "QT_QPA_PLATFORMTHEME",
+                   "QT_STYLE_OVERRIDE", "GTK_THEME", "XCURSOR_THEME", "XCURSOR_SIZE")
+# Launchers that only make sense for the user: web apps, Omarchy's own wrappers
+# and app sandboxes, which do not run as root.
+ADMIN_REFUSED_PROGRAMS = {"flatpak", "snap", "uwsm", "uwsm-app", "xdg-open", "gtk-launch"}
+
+
+def _admin_command(app):
+    """The app's own argv, or None when it has nothing that can run as root."""
+    if "tray_id" in app or "plugin_id" in app or app.get("self_launcher"):
+        return None
+    if "argv" in app:
+        return list(app["argv"])  # Standalone AppImage: an executable path.
+    # browser_web_app() is not used here: it also matches foot's --app-id=.
+    if not app.get("desktop_path") or app.get("sandboxed") or app.get("pwa"):
+        return None
+    try:
+        argv = shlex.split(app.get("exec", ""))
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    program = Path(argv[0]).name
+    if program in ADMIN_REFUSED_PROGRAMS or program.startswith("omarchy-") or argv[0].startswith("/snap/"):
+        return None
+    if program in WEB_APP_BROWSERS and any(a.startswith(("--app=", "--app-id=")) for a in argv):
+        return None  # A browser opened as a web app window.
+    return argv
+
+
+# Terminals that run a command given after -e; with nothing after it they
+# open a root shell instead.
+ADMIN_TERMINALS = {"foot", "footclient", "alacritty", "ghostty", "xterm", "xdg-terminal-exec"}
+
+
+def _uses_electron(program):
+    """Electron and Chromium refuse to start as root without --no-sandbox.
+    Spot them by the files Chromium ships next to its binary, or by a small
+    launcher script that starts electron."""
+    if Path(program).name in WEB_APP_BROWSERS:
+        return True
+    try:
+        path = Path(program).resolve()
+        folder = path.parent
+        if (folder / "chrome-sandbox").exists() or (folder / "resources" / "app.asar").exists():
+            return True
+        with path.open("rb") as handle:
+            head = handle.read(4096)
+    except OSError:
+        return False
+    return head.startswith(b"#!") and b"electron" in head.lower()
+
+
+# Apps that refuse to run as root but open root's files through GVfs's admin
+# backend themselves: they stay the user's app and polkit asks on first access.
+ADMIN_URI_APPS = {"nautilus": "admin:///"}
+GVFS_ADMIN_BACKENDS = (Path("/usr/lib/gvfsd-admin"), Path("/usr/lib/gvfs/gvfsd-admin"),
+                       Path("/usr/libexec/gvfsd-admin"))
+
+
+def _gsetting(key):
+    """A string from the user's GNOME interface settings, or ""."""
+    try:
+        output = read_bounded_output(["gsettings", "get", "org.gnome.desktop.interface", key],
+                                     max_bytes=4096, timeout=2)
+    except OSError:
+        return ""
+    value = (output or "").strip().strip("'")
+    return value if re.fullmatch(r"[\w.+-]{1,64}", value) else ""
+
+
+def _desktop_look():
+    """Theme variables for a root app: the user's GTK theme, and dark mode for
+    GTK, libadwaita and Electron when the user prefers it."""
+    env = {}
+    dark = _gsetting("color-scheme") == "prefer-dark"
+    if not os.environ.get("GTK_THEME"):
+        theme = _gsetting("gtk-theme")
+        if theme:
+            env["GTK_THEME"] = f"{theme}:dark" if dark and "dark" not in theme.lower() else theme
+    if dark:
+        env["ADW_DEBUG_COLOR_SCHEME"] = "prefer-dark"
+    return env
+
+
+def _display_scale():
+    """The session's scale for apps that do not scale themselves (X11)."""
+    value = os.environ.get("GDK_SCALE", "")
+    if not value:
+        try:
+            output = read_bounded_output(["hyprctl", "monitors", "-j"], max_bytes=256 * 1024, timeout=2)
+            value = str(next((m.get("scale", 1) for m in json.loads(output or "[]")
+                              if m.get("focused")), 1))
+        except (OSError, ValueError, AttributeError):
+            return None
+    try:
+        scale = float(value)
+    except ValueError:
+        return None
+    return f"{scale:g}" if 0.5 <= scale <= 4 and scale != 1 else None
+
+
+def admin_command(app):
+    """The argv that opens app as root, or None when it cannot run as root.
+
+    Graphical apps go through pkexec, which asks for the password with the
+    session's polkit agent. Terminal apps run sudo inside a terminal instead,
+    where sudo asks itself. Nothing is passed through a shell."""
+    if os.geteuid() == 0:
+        return None
+    argv = _admin_command(app)
+    if argv is None:
+        return None
+
+    # A terminal launcher (foot -e claude): sudo goes in front of the command,
+    # named by its full path because sudo uses root's PATH. A bare terminal
+    # opens a root login shell.
+    if Path(argv[0]).name.casefold() in TERMINALS | ADMIN_TERMINALS:
+        if Path(argv[0]).name.casefold() not in ADMIN_TERMINALS or not shutil.which("sudo"):
+            return None
+        if "-e" not in argv:
+            return argv + ["-e", "sudo", "-i"]
+        at = argv.index("-e") + 1
+        if at >= len(argv):
+            return None
+        argv[at] = shutil.which(argv[at]) or argv[at]
+        return argv[:at] + ["sudo", "--"] + argv[at:]
+    if app.get("terminal"):
+        if not (shutil.which("xdg-terminal-exec") and shutil.which("sudo")):
+            return None
+        return ["xdg-terminal-exec", "sudo", "--", shutil.which(argv[0]) or argv[0]] + argv[1:]
+
+    program = shutil.which(argv[0])
+    if program and Path(program).name in ADMIN_URI_APPS:
+        if not any(backend.exists() for backend in GVFS_ADMIN_BACKENDS):
+            return None
+        return [program, "--new-window", ADMIN_URI_APPS[Path(program).name]]
+    if not program or not shutil.which("pkexec"):
+        return None
+    argv[0] = program  # pkexec runs with root's PATH.
+    env = []
+    wayland = os.environ.get("WAYLAND_DISPLAY", "")
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if wayland and not wayland.startswith("/") and runtime:
+        wayland = str(Path(runtime) / wayland)
+    if wayland.startswith("/"):
+        env.append(f"WAYLAND_DISPLAY={wayland}")
+    if _uses_electron(program):
+        if "--no-sandbox" not in argv:
+            argv.append("--no-sandbox")
+        # As root some Electron apps switch to in-process GPU (Kudu), which shows
+        # no window on Wayland; on Xwayland it does. Root may use the display
+        # once launch_as_admin lets it in. Without libX11, Wayland is the
+        # only way, and only as a hint: a forced --ozone-platform=wayland keeps
+        # Kudu from showing a window.
+        if not any(a.startswith("--ozone-platform") for a in argv):
+            if can_admit_root_on_display():
+                argv.append("--ozone-platform=x11")
+                # Hyprland shows X11 windows unscaled (force_zero_scaling).
+                scale = _display_scale()
+                if scale and not any(a.startswith("--force-device-scale-factor") for a in argv):
+                    argv.append(f"--force-device-scale-factor={scale}")
+            elif wayland.startswith("/"):
+                argv.append("--ozone-platform-hint=auto")
+    for name in ADMIN_DISPLAY_VARS:
+        if os.environ.get(name):
+            env.append(f"{name}={os.environ[name]}")
+    if not env:
+        return None  # No display to open a window on.
+    look = {name: os.environ[name] for name in ADMIN_LOOK_VARS if os.environ.get(name)}
+    look.update(_desktop_look())
+    env += [f"{name}={value}" for name, value in look.items()]
+    return ["pkexec", "env"] + env + argv
+
+
+class _XHostAddress(ctypes.Structure):
+    _fields_ = [("family", ctypes.c_int), ("length", ctypes.c_int), ("address", ctypes.c_void_p)]
+
+
+class _XServerInterpretedAddress(ctypes.Structure):
+    _fields_ = [("typelength", ctypes.c_int), ("valuelength", ctypes.c_int),
+                ("type", ctypes.c_char_p), ("value", ctypes.c_char_p)]
+
+
+_X_FAMILY_SERVER_INTERPRETED = 5
+_X_ERROR_HANDLER = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+_x_errors = []
+# Xlib's default handler ends the process on any error; this one only counts.
+_ignore_x_error = _X_ERROR_HANDLER(lambda _display, _event: _x_errors.append(1) or 0)
+
+
+def _libx11():
+    """libX11 (every Omarchy install has it), or None."""
+    try:
+        lib = ctypes.CDLL("libX11.so.6")
+    except OSError:
+        return None
+    lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    lib.XOpenDisplay.restype = ctypes.c_void_p
+    lib.XAddHost.argtypes = [ctypes.c_void_p, ctypes.POINTER(_XHostAddress)]
+    lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    lib.XSetErrorHandler.argtypes = [_X_ERROR_HANDLER]
+    lib.XSetErrorHandler.restype = ctypes.c_void_p
+    return lib
+
+
+def can_admit_root_on_display():
+    return bool(os.environ.get("DISPLAY")) and _libx11() is not None
+
+
+def allow_root_on_display():
+    """Let root, and only root, open windows on this session's X display:
+    Xwayland admits only the session user. The same as
+    `xhost +si:localuser:root`, without needing xhost; it lasts until logout."""
+    lib, name = _libx11(), os.environ.get("DISPLAY", "")
+    if lib is None or not name:
+        return False
+    lib.XSetErrorHandler(_ignore_x_error)
+    display = lib.XOpenDisplay(name.encode())
+    if not display:
+        return False
+    try:
+        root = _XServerInterpretedAddress(len(b"localuser"), len(b"root"), b"localuser", b"root")
+        host = _XHostAddress(_X_FAMILY_SERVER_INTERPRETED, ctypes.sizeof(root),
+                             ctypes.cast(ctypes.pointer(root), ctypes.c_void_p))
+        errors = len(_x_errors)
+        lib.XAddHost(display, ctypes.byref(host))
+        lib.XSync(display, 0)
+        return len(_x_errors) == errors
+    finally:
+        lib.XCloseDisplay(display)
+
+
+def launch_as_admin(app):
+    """Start app as root. Returns the process, or None when it cannot start."""
+    argv = admin_command(app)
+    if argv is None:
+        return None
+    if "--ozone-platform=x11" in argv:
+        allow_root_on_display()
+    try:
+        return subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, start_new_session=True, env=_clean_env())
+    except OSError:
+        return None

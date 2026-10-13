@@ -4,6 +4,8 @@ Fast, theme-aware application launcher popup and bar widget for [Omarchy](https:
 
 ![Launch & Bind](preview.png)
 
+**New in 1.7:** the launcher speaks eight languages (English, German, French, Spanish, Italian, Portuguese, Dutch, Polish) and follows your system language; a settings page (gear ⚙, top right) to pick another one; and an optional **Open as administrator** action, off until you switch it on there.
+
 **New in 1.6.2:** Simple Launcher is now called **Launch & Bind**, because it does much more than launch apps. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
 
 **New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left or Backspace closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
@@ -85,6 +87,30 @@ Standalone AppImage metadata is limited to 64 KiB. Icons are extracted through a
 Icon files are never decoded on trust, whether they come from a `.desktop` file, an AppImage or a tray icon's `IconThemePath`. Each file is read once (at most 4 MiB, SVG 1 MiB). Its declared size is checked from the header on those same bytes: PNG, JPEG, GIF and WebP may declare at most 4096 px per side and 4096×4096 pixels including all animation frames. Only then is it decoded, scaled to 64 px while loading; SVG is rendered at that size directly. Anything else (oversized, malformed, XPM, ICO) shows the themed icon instead. Decoded icons are cached by path, modification time and size.
 
 Desktop entries launch through `uwsm-app` or Gio using the original desktop file. If native launching fails, the launcher reports failure; it never executes the entry’s `Exec` text through a shell.
+
+## Languages and settings
+
+The interface is built in in eight languages: English, German (Deutsch), French (Français), Spanish (Español), Italian (Italiano), Portuguese (Português), Dutch (Nederlands) and Polish (Polski). It follows the system language (`LC_ALL`, `LC_MESSAGES`, `LANG`) and falls back to English. The translations ship with the plugin: nothing is downloaded or generated.
+
+Open the settings page with the **gear (⚙)** at the top right of the popup; **← Back**, Backspace or Esc closes it again.
+
+| Setting | What it does | Default |
+| --- | --- | --- |
+| Language | **System (…)** or one of the eight languages. The popup restarts in the new language. | System |
+| Open as administrator | Adds **Open as administrator** to the actions menu of apps that can run as root (see below). | Off |
+
+Both are stored in `~/.config/applauncher/settings.json` (mode `0600`, written atomically through an exclusive temp file), next to the default shortcut modifiers.
+
+## Open as administrator (optional)
+
+Off by default. When you switch it on in the settings page, an app's actions menu gets **Open as administrator**. Nothing runs as root unless you choose that entry for one app and then enter your password.
+
+- **Graphical apps** start through `pkexec env … <app>`, so the password dialog is the session's polkit agent (built into the Omarchy shell). Only display and look variables are passed on: `WAYLAND_DISPLAY` (as an absolute socket path), `XDG_SESSION_TYPE`, `DISPLAY`, `XAUTHORITY`, scale and cursor sizes, Qt/GTK theme names and dark mode. Nothing that loads code (`LD_*`, `GTK_MODULES`, `QT_PLUGIN_PATH`, …) is passed.
+- **Electron apps** (detected by Chromium's files next to the binary) get `--no-sandbox`, which they need as root. When libX11 is available they open on Xwayland (`--ozone-platform=x11`), because some Electron apps show no window as root on Wayland. For that the launcher first allows **only the local `root` user** on your display, the same as `xhost +si:localuser:root` (called through libX11, no `xhost` needed); this lasts until you log out.
+- **Terminal apps** (`foot -e …`, `Terminal=true` entries) open in a terminal that runs `sudo -- <app>`; sudo asks for the password itself. A bare terminal opens a root login shell (`sudo -i`).
+- **Files** (Nautilus) opens `admin:///` as you, through GVFS, instead of running as root.
+- The command line is the app's own `Exec=` line split into arguments, with desktop field codes removed; it never goes through a shell. Web apps, sandboxed apps (Flatpak, Snap), Omarchy's own wrappers, plugins, tray apps and the launcher itself never get the entry.
+- If you cancel the password dialog nothing happens; if you are not authorized, or the app quits at once (some apps refuse to run as root), you get a notification.
 
 ## Installation
 

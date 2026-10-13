@@ -16,6 +16,8 @@ import sys
 
 from gi.repository import Gio, GLib
 
+from i18n import _
+
 WATCHER = ("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher")
 ITEM_INTERFACE = "org.kde.StatusNotifierItem"
 MENU_INTERFACE = "com.canonical.dbusmenu"
@@ -216,7 +218,7 @@ def list_items(with_menus=True):
             "icon": icon_file(props) or str(props.get("IconName") or "") or "application-x-executable",
             "desktop_path": "",
             "actions": flat_actions(menu),
-            "description": "Tray icon — opens its menu" if is_menu else "Tray icon",
+            "description": _("Tray icon — opens its menu") if is_menu else _("Tray icon"),
             "desktop_id": f"tray:{item_id}",
             "startup_class": "",
         })

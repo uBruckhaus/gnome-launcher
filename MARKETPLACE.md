@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `Launch & Bind`
-- **Version**: `1.6.3`
+- **Version**: `1.7.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **Launch & Bind** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 1.7 — eight languages, a settings page, optional Open as administrator.** The launcher follows the system language (English, German, French, Spanish, Italian, Portuguese, Dutch or Polish; translations ship with the plugin). The gear (⚙) opens a settings page to pick another language and to switch on **Open as administrator** (off by default): graphical apps then open through `pkexec` with the polkit password dialog, terminal apps through `sudo` in a terminal, Files as `admin:///`. Web apps, sandboxed apps, plugins and tray apps never get it.
 
 **New in 1.6 — tidier uninstalls and menus.** Shortcuts of uninstalled apps are cleaned up right away; hand-written ones in your own Hyprland files are only deleted after you answer **Delete** (with a backup), **Keep** is remembered. App menus open on their first entry, the mouse moves the same single highlight the keyboard uses, and Left or Backspace closes a menu. **Uninstall…** is quieter, focuses its button, reports failures, and for browser web apps (Chrome, Brave, Edge, …) explains how to remove them in the browser. The list keeps a steady height, the search stays when switching between apps and widgets, and the shortcut page shows an `Esc` hint next to its back arrow.
 

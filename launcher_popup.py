@@ -43,11 +43,13 @@ from launcher_core import (
     TERMINALS, app_process_name, browser_web_app, background_process_names, child_process_names, client_matches_app,
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
-    launch_action, launch_app, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
+    admin_action_enabled, admin_command, set_admin_action, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
     icon_bytes,
 )
 from palette import ThemePalette
+import i18n
+from i18n import _, ngettext
 import pidfile
 import shortcuts
 import tray
@@ -322,21 +324,24 @@ class Launcher(Gtk.Application):
 
         header = Gtk.Box(spacing=8)
         back_button = Gtk.Button()
-        back_button.set_tooltip_text("Back to apps (Esc)")
+        back_button.set_tooltip_text(_("Back to apps (Esc)"))
         back_button.add_css_class("flat")
         back_button.add_css_class("launcher-back-btn")
-        # The key that does the same, as a hint next to the arrow.
+        # "← Back" and the key that does the same: Esc on the shortcut page
+        # (Backspace is a key you may want to bind there), ⌫ on the settings page.
         back_box = Gtk.Box(spacing=6)
         back_box.append(Gtk.Image.new_from_icon_name("go-previous-symbolic"))
+        back_box.append(Gtk.Label(label=_("Back")))
         esc = Gtk.Label(label="Esc")
         esc.add_css_class("launcher-shortcut-chip")
         esc.set_valign(Gtk.Align.CENTER)
         back_box.append(esc)
         back_button.set_child(back_box)
         back_button.set_visible(False)
-        back_button.connect("clicked", lambda *_: self.close_shortcut_page())
+        back_button.connect("clicked", lambda *_: self.close_subpage())
+        self.back_chip = esc
         header.append(back_button)
-        title = Gtk.Label(label="Apps")
+        title = Gtk.Label(label=_("Apps"))
         title.add_css_class("launcher-title")
         title.set_hexpand(True)
         title.set_halign(Gtk.Align.START)
@@ -347,11 +352,23 @@ class Launcher(Gtk.Application):
         mode_button.connect("clicked", self.toggle_mode)
         header.append(mode_button)
         hidden_button = Gtk.Button(icon_name="view-reveal-symbolic")
-        hidden_button.set_tooltip_text("Show hidden apps")
+        hidden_button.set_tooltip_text(_("Show hidden apps"))
         hidden_button.add_css_class("flat")
         hidden_button.add_css_class("launcher-header-btn")
         hidden_button.connect("clicked", self.toggle_hidden)
         header.append(hidden_button)
+        # The same Nerd Font gear (U+F0493) in a small bordered box as the other plugins.
+        settings_button = Gtk.Button()
+        gear = Gtk.Label(label="\U000F0493")
+        gear.add_css_class("launcher-gear")
+        settings_button.set_child(gear)
+        settings_button.set_tooltip_text(_("Settings"))
+        settings_button.add_css_class("flat")
+        settings_button.add_css_class("launcher-header-btn")
+        settings_button.add_css_class("launcher-gear-btn")
+        settings_button.connect("clicked", lambda *_: self.open_settings_page())
+        header.append(settings_button)
+        self.settings_button = settings_button
         card.append(header)
 
         # Asks before deleting hand-written shortcuts of removed apps.
@@ -363,11 +380,11 @@ class Launcher(Gtk.Application):
         question.append(question_label)
         answers = Gtk.Box(spacing=6)
         answers.set_halign(Gtk.Align.END)
-        keep = Gtk.Button(label="Keep")
+        keep = Gtk.Button(label=_("Keep"))
         keep.add_css_class("sc-small")
         keep.connect("clicked", lambda *_: self.answer_dead_binds(False))
         answers.append(keep)
-        delete = Gtk.Button(label="Delete")
+        delete = Gtk.Button(label=_("Delete"))
         delete.add_css_class("sc-primary")
         delete.add_css_class("sc-danger-btn")
         delete.connect("clicked", lambda *_: self.answer_dead_binds(True))
@@ -414,6 +431,7 @@ class Launcher(Gtk.Application):
         self.title, self.hidden_button, self.mode_button = title, hidden_button, mode_button
         self.back_button, self.stack = back_button, stack
         self.build_shortcut_page()
+        self.build_settings_page()
         self.apply_theme()
 
     def apply_theme(self):
@@ -436,6 +454,15 @@ class Launcher(Gtk.Application):
         bg_hex = colors.get("background", "#1e1e2e")
         fg_hex = colors.get("foreground", "#cdd6f4")
         muted_hex = colors.get("muted", "#888894")
+        # The settings labels' grey in the QML plugins: Qt.darker(foreground, 1.45),
+        # i.e. the HSV value divided by 1.45.
+        try:
+            import colorsys
+            r, g, b = (int(fg_hex.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4))
+            h, sat, val = colorsys.rgb_to_hsv(r, g, b)
+            dim_hex = "#%02x%02x%02x" % tuple(round(c * 255) for c in colorsys.hsv_to_rgb(h, sat, val / 1.45))
+        except (ValueError, IndexError):
+            dim_hex = muted_hex
         free_hex, taken_hex, omarchy_hex, error_hex = key_owner_colors(colors)
 
         sel_lum = lum(sel_hex)
@@ -514,6 +541,18 @@ class Launcher(Gtk.Application):
             border-color: {colors['accent']};
         }}
         .launcher-back-btn {{ padding: 2px 6px; }}
+        .launcher-back-bordered {{ border: 1px solid alpha({colors['foreground']}, 0.35); border-radius: {radius}px; padding: 4px 10px; }}
+        .launcher-card button.launcher-gear-btn {{ border: 1px solid alpha({colors['foreground']}, 0.35); border-radius: {radius}px;
+            padding: 1px 6px; margin-right: 0; }}
+        .launcher-gear {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 13px; }}
+        .launcher-section-title {{ font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+        separator.launcher-settings-rule {{ background-color: alpha({colors['foreground']}, 0.12); background-image: none; min-height: 1px; margin: 0 0 2px 0; }}
+        .launcher-card label.launcher-setting-label {{ font-size: 11px; color: {dim_hex}; }}
+        dropdown.launcher-compact-dropdown > button {{ min-height: 0; padding: 2px 8px; font-size: 11px;
+            border: 1px solid alpha({colors['foreground']}, 0.35); border-radius: {radius}px; background: transparent; }}
+        dropdown.launcher-compact-dropdown popover label {{ font-size: 11px; }}
+        switch.launcher-compact-switch {{ min-height: 16px; min-width: 36px; }}
+        switch.launcher-compact-switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
         .launcher-menu-item {{
             outline: none;
             background: transparent;
@@ -720,6 +759,10 @@ class Launcher(Gtk.Application):
         except Exception as e:
             print("Error refreshing list:", e, file=sys.stderr)
         self.window.present()
+        # Restarted after a language change: back to where the user was.
+        if os.environ.pop("SIMPLE_LAUNCHER_PAGE", "") == "settings":
+            GLib.idle_add(self.open_settings_page)
+            return
         def _focus():
             first = self.rows.get_first_child()
             if first:
@@ -832,7 +875,7 @@ class Launcher(Gtk.Application):
                           for entry in removed]
         if names:
             self.list_bindings = None
-            self.notify("Shortcuts of removed apps deleted", ", ".join(names))
+            self.notify(_("Shortcuts of removed apps deleted"), ", ".join(names))
 
     def update_dead_binds_question(self):
         """Hand-written shortcuts of removed apps live in the user's own files:
@@ -848,8 +891,9 @@ class Launcher(Gtk.Application):
         listed = "\n".join(f"• {b['description']}: {shortcuts.combo_label(b['combo'])} ({b['file']})"
                            for b in self.dead_binds)
         self.dead_question_label.set_text(
-            f"The app of {'this shortcut' if len(self.dead_binds) == 1 else 'these shortcuts'} was uninstalled. "
-            f"Delete {'it' if len(self.dead_binds) == 1 else 'them'} from your Hyprland files?\n{listed}")
+            ngettext("The app of this shortcut was uninstalled. Delete it from your Hyprland files?",
+                     "The apps of these shortcuts were uninstalled. Delete them from your Hyprland files?",
+                     len(self.dead_binds)) + f"\n{listed}")
         self.dead_question.set_visible(True)
 
     def answer_dead_binds(self, delete):
@@ -861,12 +905,12 @@ class Launcher(Gtk.Application):
                 return
             removed = shortcuts.remove_dead_user_binds(keys)
         except (RuntimeError, OSError) as error:
-            self.notify("Could not delete the shortcuts", str(error))
+            self.notify(_("Could not delete the shortcuts"), str(error))
             return
         if removed:
             self.list_bindings = None
             self.refresh_list()
-            self.notify("Shortcuts of removed apps deleted",
+            self.notify(_("Shortcuts of removed apps deleted"),
                         ", ".join(f"{b['description']} ({shortcuts.combo_label(b['combo'])})" for b in removed))
 
     def on_overlay_click(self, _gesture, _count, x, y):
@@ -891,6 +935,10 @@ class Launcher(Gtk.Application):
             row.grab_focus()
 
     def on_key(self, _controller, key, _code, state):
+        # The settings page: Esc and Backspace go back to the list.
+        if self.settings_open() and key in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
+            self.close_settings_page()
+            return True
         if key == Gdk.KEY_Escape:
             if self.actions_menu_open():
                 self.actions_popover.popdown()
@@ -1103,7 +1151,7 @@ class Launcher(Gtk.Application):
                 dot.set_valign(Gtk.Align.END)
                 dot.set_can_target(False)
                 icon_slot.add_overlay(dot)
-                icon_slot.set_tooltip_text("Open windows" if state == "active" else "Running in background")
+                icon_slot.set_tooltip_text(_("Open windows") if state == "active" else _("Running in background"))
             line.append(icon_slot)
 
             text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -1120,9 +1168,9 @@ class Launcher(Gtk.Application):
 
             badges = []
             if is_hidden:
-                badges.append(("view-conceal-symbolic", "Hidden"))
+                badges.append(("view-conceal-symbolic", _("Hidden")))
             if app.get("bar_widget") and not app.get("in_bar"):
-                badges.append(("list-remove-symbolic", "Not in bar"))
+                badges.append(("list-remove-symbolic", _("Not in bar")))
                 row.add_css_class("launcher-row-hidden")
                 icon.add_css_class("launcher-hidden-icon")
             for badge_icon, badge_text in badges:
@@ -1144,10 +1192,10 @@ class Launcher(Gtk.Application):
                 desc.add_css_class("launcher-app-desc")
                 desc.set_ellipsize(3)
                 text_box.append(desc)
-                prefix = "[Hidden] " if is_hidden else ""
+                prefix = "[" + _("Hidden") + "] " if is_hidden else ""
                 row.set_tooltip_text(f"{prefix}{app['name']} — {desc_text}")
             else:
-                prefix = "[Hidden] " if is_hidden else ""
+                prefix = "[" + _("Hidden") + "] " if is_hidden else ""
                 row.set_tooltip_text(f"{prefix}{app['name']}")
 
             line.append(text_box)
@@ -1162,14 +1210,14 @@ class Launcher(Gtk.Application):
                     more = Gtk.Label(label=f"+{len(assigned) - 1}")
                     more.add_css_class("launcher-shortcut-more")
                     chips.append(more)
-                chips.set_tooltip_text("Global shortcut" + ("s:\n" if len(assigned) > 1 else ": ") + "\n".join(
+                chips.set_tooltip_text((_("Global shortcuts:") + "\n" if len(assigned) > 1 else _("Global shortcut:") + " ") + "\n".join(
                     shortcuts.combo_label(c) + (f" → {shortcuts.action_name(app, c['action'])}" if c["action"] else "")
                     for c in assigned))
                 line.append(chips)
             actions = Gtk.Button(icon_name="open-menu-symbolic")
             actions.add_css_class("flat")
-            actions.set_tooltip_text("Tray menu" if "tray_id" in app else
-                                     "Plugin actions" if "plugin_id" in app else "App actions")
+            actions.set_tooltip_text(_("Tray menu") if "tray_id" in app else
+                                     _("Plugin actions") if "plugin_id" in app else _("App actions"))
             actions.connect("clicked", lambda button, target=app: self.show_actions(button, target))
             line.append(actions)
             row.set_child(line)
@@ -1198,7 +1246,7 @@ class Launcher(Gtk.Application):
         if before is not None and hasattr(before, "app") and ("tray_id" in before.app) == in_tray:
             row.set_header(None)
             return
-        title = Gtk.Label(label="Running in the bar" if in_tray else "Widgets & plugins", xalign=0)
+        title = Gtk.Label(label=_("Running in the bar") if in_tray else _("Widgets & plugins"), xalign=0)
         title.add_css_class("sc-section")
         title.set_margin_start(8)
         title.set_margin_bottom(2)
@@ -1251,7 +1299,7 @@ class Launcher(Gtk.Application):
             elif button is not None:
                 self.show_actions(button, app)
             else:
-                self.notify(f"{app['name']} has no window to open", "Use its tray menu.")
+                self.notify(_("{0} has no window to open").format(app['name']), _("Use its tray menu."))
             return
         if app.get("self_launcher"):
             self.open_shortcut_page(app)  # Already open: Enter sets its keys.
@@ -1260,8 +1308,8 @@ class Launcher(Gtk.Application):
             if button is not None:
                 self.show_actions(button, app)
             else:
-                self.notify(f"{app['name']} cannot be opened from here",
-                            "Put it in the bar first." if app.get("bar_widget") and not app.get("in_bar") else "")
+                self.notify(_("{0} cannot be opened from here").format(app['name']),
+                            _("Put it in the bar first.") if app.get("bar_widget") and not app.get("in_bar") else "")
             return
         if "plugin_id" not in app:
             launch_app(app)
@@ -1270,7 +1318,31 @@ class Launcher(Gtk.Application):
         # Out of the way first: the plugin's panel takes the keyboard.
         self.hide()
         if not open_plugin(app):
-            self.notify(f"Could not open {app['name']}", "The shell has no panel to open for it.")
+            self.notify(_("Could not open {0}").format(app['name']), _("The shell has no panel to open for it."))
+
+    def open_as_admin(self, app):
+        """Open app as root: pkexec asks for the password, or sudo in a terminal."""
+        process = launch_as_admin(app)
+        self.hide()
+        if process is None:
+            self.notify(_("Could not open {0} as administrator").format(app['name']))
+            return
+
+        started = time.monotonic()
+
+        def done(_pid, status):
+            # pkexec exits 127 when not authorized or no polkit agent runs, 126
+            # when the dialog is dismissed. An app that quits with an error soon
+            # after the password most likely refuses to run as root.
+            process.returncode = os.waitstatus_to_exitcode(status)  # Reaped here.
+            if process.returncode == 127:
+                self.notify(_("{0} was not opened as administrator").format(app['name']),
+                            _("Not authorized, or no polkit agent is running."))
+            elif process.returncode not in (0, 126) and time.monotonic() - started < 60:
+                self.notify(_("{0} did not open as administrator").format(app['name']),
+                            _("It quit right away (exit code {0}). Some apps refuse to run as root.").format(process.returncode))
+        if process.args[0] == "pkexec":
+            GLib.child_watch_add(GLib.PRIORITY_DEFAULT, process.pid, done)
 
     def actions_menu_open(self):
         return self.actions_popover is not None and self.actions_popover.get_visible()
@@ -1383,8 +1455,11 @@ class Launcher(Gtk.Application):
             add_separator()
         else:
             if app.get("openable", True):
-                add_action("Open", lambda: self.launch(app), "media-playback-start-symbolic",
+                add_action(_("Open"), lambda: self.launch(app), "media-playback-start-symbolic",
                            shortcut=chip_for(""))
+                if admin_action_enabled() and admin_command(app):
+                    add_action(_("Open as administrator"), lambda: self.open_as_admin(app),
+                               "dialog-password-symbolic")
             for action in app.get("actions", []):
                 add_action(action["name"], lambda action_id=action["id"]:
                            (launch_action(app, action_id), self.hide()), "system-run-symbolic",
@@ -1394,34 +1469,34 @@ class Launcher(Gtk.Application):
         if app.get("self_launcher") or app.get("openable", True):
             if not app.get("self_launcher"):
                 add_separator()
-            add_action("Shortcut…", lambda: self.open_shortcut_page(app),
+            add_action(_("Shortcut…"), lambda: self.open_shortcut_page(app),
                        "preferences-desktop-keyboard-shortcuts-symbolic")
             add_separator()
         hidden = app["desktop_id"] in self.hidden_by_mode["plugins" if is_widget(app) else "apps"]
         # Out of the bar, a widget is hidden by that already: Hide would do nothing.
         # Unhide stays for one hidden by hand, or it stays hidden once back in the bar.
         if hidden or not self.off_bar(app):
-            add_action("Unhide from list" if hidden else "Hide from list",
+            add_action(_("Unhide from list") if hidden else _("Hide from list"),
                        lambda: self.set_hidden(app, not hidden),
                        "view-reveal-symbolic" if hidden else "view-conceal-symbolic")
         if app.get("bar_widget") and set_in_bar(app["plugin_id"], not app["in_bar"]):
             if app["in_bar"]:
-                add_action("Remove from bar", lambda: self.set_bar_placement(app, False), "list-remove-symbolic")
+                add_action(_("Remove from bar"), lambda: self.set_bar_placement(app, False), "list-remove-symbolic")
             else:
                 # Where it goes is the user's choice: left, center or right.
-                add_action("Add to bar", lambda: self.fill_bar_sections(popover, app), "list-add-symbolic",
+                add_action(_("Add to bar"), lambda: self.fill_bar_sections(popover, app), "list-add-symbolic",
                            keep_open=True, end_icon="go-next-symbolic")
         state = self.app_state(app) if not is_widget(app) else "stopped"
         if state == "active":
-            add_action("Close", lambda: self.close_app(app), "window-close-symbolic", is_destructive=True)
+            add_action(_("Close"), lambda: self.close_app(app), "window-close-symbolic", is_destructive=True)
         quit_app = self.quit_action(app, state) if state != "stopped" else None
         if quit_app:
-            add_action("Quit", quit_app, "application-exit-symbolic", is_destructive=True)
+            add_action(_("Quit"), quit_app, "application-exit-symbolic", is_destructive=True)
         # A tray icon uninstalls the app it belongs to (Steam's tray: Steam).
         owner = app.get("app", app) if "tray_id" in app else app
         if app.get("removable") or (owner.get("desktop_path") and shutil.which("omarchy-remove-launcher-entry")):
             add_separator()
-            add_action("Uninstall…", lambda: self.confirm_uninstall(owner), "user-trash-symbolic",
+            add_action(_("Uninstall…"), lambda: self.confirm_uninstall(owner), "user-trash-symbolic",
                        keep_open=True, css="uninstall")
         popover.set_child(box)
         self.focus_first_entry(box, first if "tray_id" in app else None)
@@ -1472,7 +1547,7 @@ class Launcher(Gtk.Application):
         Returns the first entry, to focus it after a level change."""
         first = None
         if trail:
-            first = add_action("Back", lambda: self.fill_actions(popover, app, trail[:-1]),
+            first = add_action(_("Back"), lambda: self.fill_actions(popover, app, trail[:-1]),
                                "go-previous-symbolic", keep_open=True)
             title = Gtk.Label(label=" › ".join(node["label"] for node in trail), xalign=0)
             title.add_css_class("sc-section")
@@ -1481,7 +1556,7 @@ class Launcher(Gtk.Application):
             nodes = trail[-1]["children"]
         else:
             if not app["tray_is_menu"] or app.get("app"):
-                first = add_action("Open", lambda: self.launch(app), "media-playback-start-symbolic",
+                first = add_action(_("Open"), lambda: self.launch(app), "media-playback-start-symbolic",
                                    shortcut=chip_for(""))
                 add_separator()
             nodes = app["tray_menu"]
@@ -1511,7 +1586,7 @@ class Launcher(Gtk.Application):
                                   sensitive=node["enabled"])
                 first = first or (item if node["enabled"] else None)
         if not nodes:
-            empty = Gtk.Label(label="No menu", xalign=0)
+            empty = Gtk.Label(label=_("No menu"), xalign=0)
             empty.add_css_class("sc-empty")
             entries.append(empty)
         # Separators left at the end (before the moved Quit) would double up.
@@ -1526,7 +1601,7 @@ class Launcher(Gtk.Application):
     def click_tray_entry(self, app, node):
         self.hide()
         if not tray.click(app, node["id"]):
-            self.notify(f"{app['name']}: “{node['label']}” did not respond")
+            self.notify(_("{0}: “{1}” did not respond").format(app['name'], node['label']))
 
     def confirm_uninstall(self, app):
         """Omarchy's uninstall: the same question, then omarchy-remove-launcher-entry,
@@ -1538,7 +1613,7 @@ class Launcher(Gtk.Application):
         box.set_margin_top(10)
         box.set_margin_bottom(8)
         browser = None if "plugin_id" in app else browser_web_app(app)
-        question = f"How to uninstall {app['name']}" if browser else f"Do you want to uninstall {app['name']}?"
+        question = (_("How to uninstall {0}") if browser else _("Do you want to uninstall {0}?")).format(app['name'])
         message = Gtk.Label(label=question, xalign=0, wrap=True, max_width_chars=32)
         box.append(message)
         loses_work = False
@@ -1551,9 +1626,9 @@ class Launcher(Gtk.Application):
         elif browser:
             # Only the browser can uninstall its web apps: deleting the menu
             # entry here would not, so there is no Uninstall button.
-            note = Gtk.Label(label=f"{app['name']} is a web app installed in {browser}, so only {browser} "
-                                   f"can uninstall it: open the app and choose ⋮ → Uninstall, or right-click "
-                                   f"it on {APPS_PAGES.get(browser, 'its apps page')} and choose Remove.",
+            note = Gtk.Label(label=_("{0} is a web app installed in {1}, so only {1} can uninstall it: open the app "
+                                     "and choose ⋮ → Uninstall, or right-click it on {2} and choose Remove.").format(
+                                   app['name'], browser, APPS_PAGES.get(browser, _("its apps page"))),
                              xalign=0, wrap=True, max_width_chars=32)
             note.add_css_class("sc-status")
             note.add_css_class("sc-info")
@@ -1561,7 +1636,7 @@ class Launcher(Gtk.Application):
         buttons = Gtk.Box(spacing=6)
         buttons.set_halign(Gtk.Align.END)
         if browser:
-            close = Gtk.Button(label="Close")
+            close = Gtk.Button(label=_("Close"))
             self.focus_follows_pointer(close)
             close.add_css_class("sc-small")
             close.connect("clicked", lambda *_: popover.popdown())
@@ -1570,12 +1645,12 @@ class Launcher(Gtk.Application):
             popover.set_child(box)
             close.grab_focus()
             return
-        cancel = Gtk.Button(label="Cancel")
+        cancel = Gtk.Button(label=_("Cancel"))
         self.focus_follows_pointer(cancel)
         cancel.add_css_class("sc-small")
         cancel.connect("clicked", lambda *_: popover.popdown())
         buttons.append(cancel)
-        confirm = Gtk.Button(label="Uninstall")
+        confirm = Gtk.Button(label=_("Uninstall"))
         self.focus_follows_pointer(confirm)
         confirm.add_css_class("sc-primary")
         confirm.add_css_class("sc-danger-btn")
@@ -1642,13 +1717,14 @@ class Launcher(Gtk.Application):
             box.append(button)
             return button
 
-        item("Back", "go-previous-symbolic", lambda: self.fill_actions(popover, app))
-        title = Gtk.Label(label=f"Add {app['name']} to the bar", xalign=0)
+        item(_("Back"), "go-previous-symbolic", lambda: self.fill_actions(popover, app))
+        title = Gtk.Label(label=_("Add {0} to the bar").format(app['name']), xalign=0)
         title.add_css_class("sc-section")
         title.set_margin_start(8)
         box.append(title)
         default = app.get("bar_section") if app.get("bar_section") in BAR_SECTIONS else None
-        buttons = {section: item(section.capitalize(), f"format-justify-{section}-symbolic",
+        buttons = {section: item({"left": _("Left"), "center": _("Center"), "right": _("Right")}.get(section, section.capitalize()),
+                                 f"format-justify-{section}-symbolic",
                                  lambda s=section: (popover.popdown(), self.set_bar_placement(app, True, s)),
                                  "default" if section == default else None)
                    for section in BAR_SECTIONS}
@@ -1664,7 +1740,7 @@ class Launcher(Gtk.Application):
         try:
             process = Gio.Subprocess.new(argv, Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_MERGE)
         except GLib.Error as error:
-            self.notify(f"Could not change the bar for {plugin['name']}", error.message)
+            self.notify(_("Could not change the bar for {0}").format(plugin['name']), error.message)
             return
 
         # Taken out of the bar, the row leaves the list: keep the place there.
@@ -1750,7 +1826,7 @@ class Launcher(Gtk.Application):
             return label
 
         # 1. What this app has now.
-        current_title = section("Shortcuts")
+        current_title = section(_("Shortcuts"))
         current = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.append(current)
 
@@ -1760,26 +1836,26 @@ class Launcher(Gtk.Application):
 
         # 2. Adding a new one: modifiers, key, verdict, free keys, button.
         add_header = Gtk.Box(spacing=6)
-        add_title = Gtk.Label(label="Add a shortcut", xalign=0)
+        add_title = Gtk.Label(label=_("Add a shortcut"), xalign=0)
         add_title.add_css_class("sc-section")
         add_title.set_hexpand(True)
         add_header.append(add_title)
-        add_cancel = Gtk.Button(label="Cancel")
+        add_cancel = Gtk.Button(label=_("Cancel"))
         add_cancel.add_css_class("sc-small")
         add_cancel.add_css_class("flat")
-        add_cancel.set_tooltip_text("Keep the current key")
+        add_cancel.set_tooltip_text(_("Keep the current key"))
         add_cancel.set_visible(False)
         add_cancel.connect("clicked", lambda *_: self.cancel_change_shortcut())
         add_header.append(add_cancel)
         box.append(add_header)
 
         target_row = Gtk.Box(spacing=8)
-        target_label = Gtk.Label(label="Opens", xalign=0)
+        target_label = Gtk.Label(label=_("Opens"), xalign=0)
         target_label.add_css_class("sc-note")
         target_row.append(target_label)
         target = Gtk.DropDown.new_from_strings([""])
         target.set_hexpand(True)
-        target.set_tooltip_text("Open the app, or one of its own actions such as a private window")
+        target.set_tooltip_text(_("Open the app, or one of its own actions such as a private window"))
         target.connect("notify::selected", lambda *_: self.on_shortcut_target_changed())
         target_row.append(target)
         box.append(target_row)
@@ -1794,27 +1870,27 @@ class Launcher(Gtk.Application):
             toggles[mod] = toggle
         box.append(mods_row)
 
-        default_check = Gtk.CheckButton(label="Default for apps without a shortcut")
+        default_check = Gtk.CheckButton(label=_("Default for apps without a shortcut"))
         default_check.add_css_class("sc-default")
         default_check.connect("toggled", self.on_shortcut_default_toggled)
         box.append(default_check)
 
-        two_step = Gtk.CheckButton(label="Two steps — then press another key (e.g. Super + Alt + Space, N)")
+        two_step = Gtk.CheckButton(label=_("Two steps — then press another key (e.g. Super + Alt + Space, N)"))
         two_step.add_css_class("sc-default")
-        two_step.set_tooltip_text("Press the first combo, let go, then a single key. Several shortcuts "
-                                  "can share the first combo, each with its own second key.")
+        two_step.set_tooltip_text(_("Press the first combo, let go, then a single key. Several shortcuts "
+                                    "can share the first combo, each with its own second key."))
         two_step.connect("toggled", self.on_two_step_toggled)
         box.append(two_step)
 
         key_box = Gtk.Box(spacing=6)
         key_box.add_css_class("sc-key")
         key_box.set_halign(Gtk.Align.FILL)
-        key_box.set_tooltip_text("Press a key now. Hold modifiers while pressing, or toggle them above.")
+        key_box.set_tooltip_text(_("Press a key now. Hold modifiers while pressing, or toggle them above."))
         key_box.set_hexpand(True)
         # Assign sits beside the key it applies, to save a row.
         key_row = Gtk.Box(spacing=8)
         key_row.append(key_box)
-        apply = Gtk.Button(label="Assign")
+        apply = Gtk.Button(label=_("Assign"))
         apply.add_css_class("sc-primary")
         apply.set_valign(Gtk.Align.CENTER)
         apply.connect("clicked", lambda *_: self.apply_shortcut())
@@ -1825,10 +1901,10 @@ class Launcher(Gtk.Application):
         status.add_css_class("sc-status")
         box.append(status)
 
-        suggest_title = section("Free keys")
+        suggest_title = section(_("Free keys"))
         legend = Gtk.Box(spacing=10)
-        for text, css in (("● free", "sc-legend-free"), ("● yours", "sc-legend-yours"),
-                          ("● Omarchy default", "sc-legend-omarchy")):
+        for text, css in (("● " + _("free"), "sc-legend-free"), ("● " + _("yours"), "sc-legend-yours"),
+                          ("● " + _("Omarchy default"), "sc-legend-omarchy")):
             item = Gtk.Label(label=text)
             item.add_css_class("sc-legend")
             item.add_css_class(css)
@@ -1845,7 +1921,7 @@ class Launcher(Gtk.Application):
 
         # Keys that are not letters, used with the selected modifiers. Clicking
         # also helps when Hyprland grabs a combo before the launcher sees it.
-        section("Other keys")
+        section(_("Other keys"))
         others = Gtk.FlowBox()
         others.set_selection_mode(Gtk.SelectionMode.NONE)
         others.set_max_children_per_line(6)
@@ -1886,7 +1962,7 @@ class Launcher(Gtk.Application):
             parts += [None, shortcuts.key_label(combo["then"])]
         for part in parts:
             if part is None:
-                then = Gtk.Label(label="then")
+                then = Gtk.Label(label=_("then"))
                 then.add_css_class("sc-note")
                 caps.append(then)
                 continue
@@ -1898,6 +1974,105 @@ class Launcher(Gtk.Application):
                 cap.add_css_class("sc-cap-dim")
             caps.append(cap)
         return caps
+
+    def build_settings_page(self):
+        """Settings, laid out like the other plugins' settings pages: a rule
+        under the header, then label | control rows. Switching the language
+        restarts the popup (same process id) so every label is rebuilt."""
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_margin_start(4)
+        page.set_margin_end(4)
+        page.set_size_request(-1, LIST_HEIGHT)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("launcher-settings-rule")
+        page.append(rule)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+
+        def label(text, tooltip=None):
+            widget = Gtk.Label(label=text, xalign=0)
+            widget.add_css_class("launcher-setting-label")
+            widget.set_size_request(150, -1)
+            if tooltip:
+                widget.set_tooltip_text(tooltip)
+            return widget
+
+        self.language_codes = ["auto"] + [code for code, _name in i18n.LANGUAGES]
+        names = [_("System ({0})").format(i18n.language_name(i18n.system_language()))] + [name for _code, name in i18n.LANGUAGES]
+        dropdown = Gtk.DropDown.new_from_strings(names)
+        dropdown.add_css_class("launcher-compact-dropdown")
+        dropdown.set_halign(Gtk.Align.START)
+        dropdown.set_valign(Gtk.Align.CENTER)
+        dropdown.set_tooltip_text(_("The launcher restarts in the new language."))
+        setting = i18n.language_setting()
+        dropdown.set_selected(self.language_codes.index(setting) if setting in self.language_codes else 0)
+        dropdown.connect("notify::selected", self.on_language_selected)
+        grid.attach(label(_("Language"), _("The launcher restarts in the new language.")), 0, 0, 1, 1)
+        grid.attach(dropdown, 1, 0, 1, 1)
+
+        admin_tip = _("Adds “Open as administrator” to an app's menu. It asks for your password every time.")
+        admin_switch = Gtk.Switch(active=admin_action_enabled(), halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        admin_switch.add_css_class("launcher-compact-switch")
+        admin_switch.set_tooltip_text(admin_tip)
+        admin_switch.connect("notify::active", self.on_admin_action_toggled)
+        grid.attach(label(_("Open as administrator"), admin_tip), 0, 1, 1, 1)
+        grid.attach(admin_switch, 1, 1, 1, 1)
+        page.append(grid)
+        self.admin_switch = admin_switch
+        self.language_dropdown = dropdown
+        self.stack.add_named(page, "settings")
+
+    def on_language_selected(self, dropdown, _param):
+        code = self.language_codes[dropdown.get_selected()]
+        if code == i18n.language_setting():
+            return
+        try:
+            i18n.save_language(code)
+        except OSError as error:
+            self.notify(_("Could not save the language"), str(error))
+            return
+        os.environ["SIMPLE_LAUNCHER_PAGE"] = "settings"
+        self.restart(self.mode)
+
+    def on_admin_action_toggled(self, switch, _param):
+        try:
+            set_admin_action(switch.get_active())
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+
+    def settings_open(self):
+        return self.stack.get_visible_child_name() == "settings"
+
+    def open_settings_page(self):
+        if self.shortcut_app is not None:
+            self.close_shortcut_page(focus_list=False)
+        self.back_chip.set_label("· ⌫")
+        self.back_chip.remove_css_class("launcher-shortcut-chip")
+        self.back_button.add_css_class("launcher-back-bordered")
+        self.title.add_css_class("launcher-section-title")
+        self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
+        self.back_button.set_visible(True)
+        for button in (self.hidden_button, self.mode_button, self.settings_button):
+            button.set_visible(False)
+        self.stack.set_visible_child_name("settings")
+        self.update_title()
+        self.language_dropdown.grab_focus()
+
+    def close_settings_page(self):
+        self.back_button.set_visible(False)
+        self.back_chip.add_css_class("launcher-shortcut-chip")
+        self.back_button.remove_css_class("launcher-back-bordered")
+        self.title.remove_css_class("launcher-section-title")
+        for button in (self.hidden_button, self.mode_button, self.settings_button):
+            button.set_visible(True)
+        self.stack.set_visible_child_name("list")
+        self.update_title()
+        self.refresh_list()
+
+    def close_subpage(self):
+        if self.settings_open():
+            self.close_settings_page()
+        else:
+            self.close_shortcut_page()
 
     def open_shortcut_page(self, app):
         if shortcuts.app_launch_argv(app) is None:
@@ -1923,9 +2098,12 @@ class Launcher(Gtk.Application):
         # or picks a free key, so Assign starts disabled.
         self.set_two_step(False)
         self.set_shortcut_combo(shortcuts.load_default_mods(), None, None)
+        self.back_chip.set_label("Esc")
+        self.back_button.set_tooltip_text(_("Back to apps (Esc)"))
         self.back_button.set_visible(True)
         self.hidden_button.set_visible(False)
         self.mode_button.set_visible(False)
+        self.settings_button.set_visible(False)
         self.stack.set_visible_child_name("shortcut")
         self.update_title()
         self.set_shortcut_inhibit(True)
@@ -1939,6 +2117,7 @@ class Launcher(Gtk.Application):
         self.back_button.set_visible(False)
         self.hidden_button.set_visible(True)
         self.mode_button.set_visible(True)
+        self.settings_button.set_visible(True)
         self.stack.set_visible_child_name("list")
         self.update_title()
         if focus_list:
@@ -2013,14 +2192,14 @@ class Launcher(Gtk.Application):
                 edit = Gtk.Button(icon_name="document-edit-symbolic")
                 edit.add_css_class("sc-small")
                 edit.add_css_class("flat")
-                edit.set_tooltip_text("Change this shortcut to another key")
+                edit.set_tooltip_text(_("Change this shortcut to another key"))
                 edit.set_valign(Gtk.Align.CENTER)
                 edit.connect("clicked", lambda *_: change())
                 row.append(edit)
                 click = Gtk.GestureClick()
                 click.connect("released", lambda *_: change())
                 text.add_controller(click)
-                text.set_tooltip_text("Click to change this shortcut")
+                text.set_tooltip_text(_("Click to change this shortcut"))
             action = Gtk.Button(label=button) if len(button) > 1 else Gtk.Button(icon_name="window-close-symbolic")
             action.add_css_class("sc-small")
             action.set_tooltip_text(tooltip)
@@ -2032,15 +2211,15 @@ class Launcher(Gtk.Application):
         active = 0
         externals = bindings.external_shortcuts(app)
         for combo in entry["shortcuts"]:
-            note = f"Opens {self.shortcut_target(app, combo)}"
+            note = _("Opens {0}").format(self.shortcut_target(app, combo))
             same = next((b for b in externals if shortcuts.combo_id(b["combo"]) == shortcuts.combo_id(combo)
                          and b["action"] == combo.get("action", "")), None)
             if same:
-                note += f" · duplicate of your {same['file']} binding — remove it here to tidy up"
+                note += " · " + _("duplicate of your {0} binding — remove it here to tidy up").format(same['file'])
             elif combo.get("replaces"):
-                note += f" · overrides “{combo['replaces']}”"
-            item(combo, "Launcher", note, "×", "Remove this shortcut"
-                 + (f" — “{combo['replaces']}” works again" if combo.get("replaces") else ""),
+                note += " · " + _("overrides “{0}”").format(combo['replaces'])
+            item(combo, "Launcher", note, "×", _("Remove this shortcut")
+                 + (" — " + _("“{0}” works again").format(combo['replaces']) if combo.get("replaces") else ""),
                  lambda c=combo: self.remove_shortcut(c),
                  change=lambda c=combo: self.start_change_shortcut(c, None))
             active += 1
@@ -2050,26 +2229,26 @@ class Launcher(Gtk.Application):
             cid = shortcuts.combo_id(bind["combo"])
             if cid in disabled_ids or cid in owned_ids:
                 continue
-            origin = "Omarchy default" if bind["file"] == "Omarchy" else f"Your {bind['file']}"
-            note = f"Opens {self.shortcut_target(app, bind)} · {origin}"
+            origin = _("Omarchy default") if bind["file"] == "Omarchy" else _("Your {0}").format(bind['file'])
+            note = _("Opens {0}").format(self.shortcut_target(app, bind)) + f" · {origin}"
             if bind["description"] and bind["description"] != self.shortcut_target(app, bind):
                 note += f" “{bind['description']}”"
             item(bind["combo"], bind["file"], note, "×",
-                 f"Turn off — {bind['file']} stays unchanged and you can turn it back on",
+                 _("Turn off — {0} stays unchanged and you can turn it back on").format(bind['file']),
                  lambda b=bind: self.disable_external_shortcut(b),
                  change=lambda b=bind: self.start_change_shortcut({**b["combo"], "action": b["action"]}, b))
             active += 1
         if not active:
-            empty = Gtk.Label(label="None yet — add one below.", xalign=0)
+            empty = Gtk.Label(label=_("None yet — add one below."), xalign=0)
             empty.add_css_class("sc-empty")
             self.sc_current.append(empty)
         for combo in entry["disabled"]:
-            was = f" · was “{combo['description']}”" if combo.get("description") else ""
-            item(combo, combo.get("source") or "Config", f"Turned off{was}", "Turn on",
-                 "Use this shortcut from your config again", lambda c=combo: self.restore_external_shortcut(c),
+            was = " · " + _("was “{0}”").format(combo['description']) if combo.get("description") else ""
+            item(combo, combo.get("source") or "Config", _("Turned off") + was, _("Turn on"),
+                 _("Use this shortcut from your config again"), lambda c=combo: self.restore_external_shortcut(c),
                  dim=True)
         count = f" ({active})" if active > 1 else ""
-        self.sc_current_title.set_label(f"Shortcuts for {app['name']}{count}")
+        self.sc_current_title.set_label(_("Shortcuts for {0}").format(app['name']) + count)
 
     def current_shortcut_action(self):
         index = self.sc_target.get_selected()
@@ -2119,9 +2298,9 @@ class Launcher(Gtk.Application):
     def sync_change_mode(self):
         if self.sc_editing:
             label = shortcuts.combo_label(self.sc_editing["combo"])
-            self.sc_add_title.set_label(f"Change {label} to")
+            self.sc_add_title.set_label(_("Change {0} to").format(label))
         else:
-            self.sc_add_title.set_label("Add a shortcut")
+            self.sc_add_title.set_label(_("Add a shortcut"))
         self.sc_add_cancel.set_visible(self.sc_editing is not None)
 
     def render_shortcut_suggestions(self):
@@ -2131,11 +2310,11 @@ class Launcher(Gtk.Application):
         while child := self.sc_suggest.get_first_child():
             self.sc_suggest.remove(child)
         self.sc_legend.set_visible(bool(mods))
-        self.sc_legend.set_tooltip_text("Taken keys can be rebound; the original works again when you remove the shortcut.")
+        self.sc_legend.set_tooltip_text(_("Taken keys can be rebound; the original works again when you remove the shortcut."))
         if self.picking_then():
             first = shortcuts.combo_label({"mods": mods, "key": self.sc_key})
             self.sc_suggestions = [shortcuts.make_combo(mods, self.sc_key, k) for k in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
-            self.sc_suggest_title.set_label(f"After {first}, press")
+            self.sc_suggest_title.set_label(_("After {0}, press").format(first))
             for combo in self.sc_suggestions:
                 chip = Gtk.Button(label=combo["then"])
                 chip.add_css_class("sc-letter")
@@ -2146,7 +2325,7 @@ class Launcher(Gtk.Application):
         if mods:
             # Every letter, coloured by who has it; taken ones can be rebound.
             self.sc_suggestions = [shortcuts.make_combo(mods, k) for k in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
-            self.sc_suggest_title.set_label("Keys with " + " + ".join(shortcuts.MOD_LABELS[m] for m in mods))
+            self.sc_suggest_title.set_label(_("Keys with {0}").format(" + ".join(shortcuts.MOD_LABELS[m] for m in mods)))
             for combo in self.sc_suggestions:
                 chip = Gtk.Button(label=combo["key"])
                 chip.add_css_class("sc-letter")
@@ -2155,16 +2334,16 @@ class Launcher(Gtk.Application):
                 self.sc_suggest.append(chip)
             return self.mark_other_keys(mods)
         self.sc_suggestions = self.shortcut_bindings.suggestions(app, self.sc_app_id, None)
-        self.sc_suggest_title.set_label("Free suggestions")
+        self.sc_suggest_title.set_label(_("Free suggestions"))
         for combo in self.sc_suggestions:
             chip = Gtk.Button(label=shortcuts.combo_label(combo).replace(" + ", "+"))
             chip.add_css_class("sc-suggest")
-            chip.set_tooltip_text(f"Use {shortcuts.combo_label(combo)}")
+            chip.set_tooltip_text(_("Use {0}").format(shortcuts.combo_label(combo)))
             chip.connect("clicked", lambda *_, c=combo: self.pick_shortcut_key(c["mods"], c["key"]))
             self.sc_suggest.append(chip)
         self.mark_other_keys(mods)
         if not self.sc_suggestions:
-            none = Gtk.Label(label="Choose modifiers above to see every key.", xalign=0)
+            none = Gtk.Label(label=_("Choose modifiers above to see every key."), xalign=0)
             none.add_css_class("sc-note")
             self.sc_suggest.append(none)
 
@@ -2178,7 +2357,7 @@ class Launcher(Gtk.Application):
                 for css in KEY_STYLES.values():
                     button.remove_css_class(css)
                 button.remove_css_class("sc-key-picked")
-                button.set_tooltip_text("Choose modifiers first")
+                button.set_tooltip_text(_("Choose modifiers first"))
 
     def style_key_chip(self, chip, combo):
         """Colour a key button by who has the combo, and say so on hover."""
@@ -2194,15 +2373,15 @@ class Launcher(Gtk.Application):
         (chip.add_css_class if picked else chip.remove_css_class)("sc-key-picked")
         label = shortcuts.combo_label(combo)
         if level == shortcuts.FREE:
-            tip = f"{label} — free"
+            tip = _("{0} — free").format(label)
         elif level in (shortcuts.SAME, shortcuts.RETARGET):
-            tip = f"{label} — already opens {self.shortcut_app['name']}"
+            tip = _("{0} — already opens {1}").format(label, self.shortcut_app['name'])
         elif level == shortcuts.OMARCHY:
-            tip = f"{label} — Omarchy default “{owner}”; click to rebind"
+            tip = _("{0} — Omarchy default “{1}”; click to rebind").format(label, owner)
         elif level == shortcuts.LAUNCHER:
-            tip = f"{label} — opens {owner}; click to move it here"
+            tip = _("{0} — opens {1}; click to move it here").format(label, owner)
         else:
-            tip = f"{label} — your binding “{owner}”; click to rebind"
+            tip = _("{0} — your binding “{1}”; click to rebind").format(label, owner)
         chip.set_tooltip_text(tip)
 
     def pick_shortcut_key(self, mods, key):
@@ -2262,8 +2441,8 @@ class Launcher(Gtk.Application):
         self.sc_default_check.set_sensitive(bool(mods))
         label = " + ".join(shortcuts.MOD_LABELS[m] for m in default)
         self.sc_default_check.set_tooltip_text(
-            f"Current default: {label}. Check to make the selected modifiers the default; "
-            "uncheck to go back to Super + Shift.")
+            _("Current default: {0}. Check to make the selected modifiers the default; "
+              "uncheck to go back to Super + Shift.").format(label))
 
     def on_shortcut_default_toggled(self, check):
         if self.sc_syncing:
@@ -2272,7 +2451,7 @@ class Launcher(Gtk.Application):
         try:
             shortcuts.save_default_mods(mods if check.get_active() and mods else shortcuts.DEFAULT_MODS)
         except OSError as error:
-            self.set_shortcut_status(f"Could not save the default: {error}", "sc-danger")
+            self.set_shortcut_status(_("Could not save the default: {0}").format(error), "sc-danger")
         self.sync_shortcut_default_check()
 
     def current_shortcut_combo(self):
@@ -2294,7 +2473,7 @@ class Launcher(Gtk.Application):
             self.sc_apply_button.add_css_class(button_style)
         if self.sc_editing and button_label in (None, "Assign"):
             button_label = "Change"
-        self.sc_apply_button.set_label(button_label or "Assign")
+        self.sc_apply_button.set_label(_(button_label or "Assign"))
         self.sc_apply_button.set_sensitive(enabled)
 
     def show_shortcut_keys(self, combo):
@@ -2308,11 +2487,11 @@ class Launcher(Gtk.Application):
         if self.picking_then():
             # First step chosen: show it, then wait for the second key.
             self.sc_key_box.append(self.keycaps({"mods": mods, "key": self.sc_key}, large=True))
-            then = Gtk.Label(label="then")
+            then = Gtk.Label(label=_("then"))
             then.add_css_class("sc-note")
             then.set_valign(Gtk.Align.CENTER)
             self.sc_key_box.append(then)
-            placeholder = Gtk.Label(label="a second key", xalign=0)
+            placeholder = Gtk.Label(label=_("a second key"), xalign=0)
             placeholder.add_css_class("sc-placeholder")
             placeholder.set_valign(Gtk.Align.CENTER)
             self.sc_key_box.append(placeholder)
@@ -2321,7 +2500,7 @@ class Launcher(Gtk.Application):
             caps = self.keycaps({"mods": mods, "key": ""}, large=True)
             caps.remove(caps.get_last_child())  # drop the empty key cap
             self.sc_key_box.append(caps)
-        placeholder = Gtk.Label(label="select a key", xalign=0)
+        placeholder = Gtk.Label(label=_("select a key"), xalign=0)
         placeholder.add_css_class("sc-placeholder")
         placeholder.set_valign(Gtk.Align.CENTER)
         self.sc_key_box.append(placeholder)
@@ -2336,45 +2515,45 @@ class Launcher(Gtk.Application):
         name = self.shortcut_app["name"]
         if combo is None:
             if self.picking_then():
-                self.set_shortcut_status("Now press the second key on its own, or pick one below.", "sc-info")
+                self.set_shortcut_status(_("Now press the second key on its own, or pick one below."), "sc-info")
             elif self.sc_two_step.get_active():
-                self.set_shortcut_status("Press the first combo (with modifiers), or pick a key below.", "sc-info")
+                self.set_shortcut_status(_("Press the first combo (with modifiers), or pick a key below."), "sc-info")
             else:
-                self.set_shortcut_status("Press a key, or pick a free key below.", "sc-info")
+                self.set_shortcut_status(_("Press a key, or pick a free key below."), "sc-info")
             return
         if not combo["mods"]:
-            self.set_shortcut_status("Choose at least one modifier — Super is recommended.", "sc-info")
+            self.set_shortcut_status(_("Choose at least one modifier — Super is recommended."), "sc-info")
             return
         level, owner = self.classify_shortcut(combo)
         target = self.shortcut_target(self.shortcut_app, {"action": self.current_shortcut_action()})
         if self.sc_editing and shortcuts.combo_id(combo) == shortcuts.combo_id(self.sc_editing["combo"]):
             if level == shortcuts.SAME:
-                self.set_shortcut_status("That is the current key — press a different one, or pick "
-                                         "something else to open.", "sc-info")
+                self.set_shortcut_status(_("That is the current key — press a different one, or pick "
+                                           "something else to open."), "sc-info")
             else:
-                self.set_shortcut_status(f"✓ Same key, now opens {target}.", "sc-free", "Change", None, True)
+                self.set_shortcut_status(_("✓ Same key, now opens {0}.").format(target), "sc-free", "Change", None, True)
             return
         if level == shortcuts.RETARGET:
             was = self.shortcut_target(self.shortcut_app, {"action": owner})
-            self.set_shortcut_status(f"Opens {was} now — assigning makes it open {target}.",
+            self.set_shortcut_status(_("Opens {0} now — assigning makes it open {1}.").format(was, target),
                                      "sc-info", "Change", None, True)
             return
         if level == shortcuts.FREE:
-            tip = "" if "SUPER" in combo["mods"] else " Without Super, apps can no longer receive it."
-            self.set_shortcut_status(f"✓ Free.{tip}", "sc-free", "Assign", None, True)
+            tip = "" if "SUPER" in combo["mods"] else " " + _("Without Super, apps can no longer receive it.")
+            self.set_shortcut_status(_("✓ Free.") + tip, "sc-free", "Assign", None, True)
         elif level == shortcuts.SAME:
             source = f" (“{owner}”)" if owner and owner != name else ""
-            self.set_shortcut_status(f"Already opens {target}{source} — nothing to add.", "sc-info")
+            self.set_shortcut_status(_("Already opens {0} — nothing to add.").format(target + source), "sc-info")
         elif level == shortcuts.LAUNCHER:
-            self.set_shortcut_status(f"Opens {owner} now. Assigning moves it to {target}.",
+            self.set_shortcut_status(_("Opens {0} now. Assigning moves it to {1}.").format(owner, target),
                                      "sc-warn", "Move here", "sc-warn-btn", True)
         elif level == shortcuts.CUSTOM:
-            self.set_shortcut_status(f"Your binding “{owner}”. Assigning turns it off while this shortcut "
-                                     "exists; removing the shortcut brings it back.",
+            self.set_shortcut_status(_("Your binding “{0}”. Assigning turns it off while this shortcut "
+                                       "exists; removing the shortcut brings it back.").format(owner),
                                      "sc-warn", "Rebind", "sc-warn-btn", True)
         else:
-            self.set_shortcut_status(f"Omarchy default “{owner}”. Assigning turns it off while this shortcut "
-                                     "exists; removing the shortcut brings it back.",
+            self.set_shortcut_status(_("Omarchy default “{0}”. Assigning turns it off while this shortcut "
+                                       "exists; removing the shortcut brings it back.").format(owner),
                                      "sc-hint-omarchy", "Rebind", "sc-omarchy-btn", True)
 
     def on_shortcut_key(self, controller, keyval, keycode, state):
@@ -2417,7 +2596,7 @@ class Launcher(Gtk.Application):
         if shortcuts.make_combo([], name) is None:
             self.sc_key = None
             self.show_shortcut_keys(None)
-            self.set_shortcut_status("That key cannot be used for a shortcut.", "sc-info")
+            self.set_shortcut_status(_("That key cannot be used for a shortcut."), "sc-info")
             return True
 
         held = {
@@ -2445,8 +2624,8 @@ class Launcher(Gtk.Application):
         try:
             shortcuts.save_and_apply(new_state)
         except (RuntimeError, OSError) as error:
-            first = str(error).strip().splitlines()[0] if str(error).strip() else "unknown error"
-            self.set_shortcut_status(f"Not applied — Hyprland reported: {first}", "sc-danger")
+            first = str(error).strip().splitlines()[0] if str(error).strip() else _("unknown error")
+            self.set_shortcut_status(_("Not applied — Hyprland reported: {0}").format(first), "sc-danger")
             return False
         finally:
             # Saving reloads Hyprland, which leaves the capture submap.
@@ -2488,7 +2667,7 @@ class Launcher(Gtk.Application):
         entry["disabled"] = [c for c in entry["disabled"] if shortcuts.combo_id(c) != cid]
         replaces = owner if level in (shortcuts.CUSTOM, shortcuts.OMARCHY) else ""
         target = self.shortcut_target(self.shortcut_app, {"action": action})
-        message = f"✓ Saved — {shortcuts.combo_label(combo)} opens {target}."
+        message = _("✓ Saved — {0} opens {1}.").format(shortcuts.combo_label(combo), target)
         editing = self.sc_editing
         if editing:
             old = editing["combo"]
@@ -2499,8 +2678,8 @@ class Launcher(Gtk.Application):
             else:
                 bind = editing["bind"]
                 entry["disabled"].append({**old, "description": bind["description"], "source": bind["file"]})
-            message = (f"✓ {shortcuts.combo_label(combo)} now opens {target}." if old_id == cid else
-                       f"✓ Changed {shortcuts.combo_label(old)} to {shortcuts.combo_label(combo)}.")
+            message = (_("✓ {0} now opens {1}.").format(shortcuts.combo_label(combo), target) if old_id == cid else
+                       _("✓ Changed {0} to {1}.").format(shortcuts.combo_label(old), shortcuts.combo_label(combo)))
         entry["shortcuts"].append({**combo, "replaces": replaces, "action": action})
         self.commit_shortcuts(new_state, message)
 
@@ -2509,22 +2688,22 @@ class Launcher(Gtk.Application):
         cid = shortcuts.combo_id(combo)
         entry = self.shortcut_entry(new_state)
         entry["shortcuts"] = [c for c in entry["shortcuts"] if shortcuts.combo_id(c) != cid]
-        restored = f" “{combo['replaces']}” works again." if combo.get("replaces") else ""
-        self.commit_shortcuts(new_state, f"✓ Removed {shortcuts.combo_label(combo)}.{restored}")
+        restored = " " + _("“{0}” works again").format(combo['replaces']) + "." if combo.get("replaces") else ""
+        self.commit_shortcuts(new_state, _("✓ Removed {0}.").format(shortcuts.combo_label(combo)) + restored)
 
     def disable_external_shortcut(self, bind):
         new_state = copy.deepcopy(self.shortcut_state)
         entry = self.shortcut_entry(new_state)
         entry["disabled"].append({**bind["combo"], "description": bind["description"], "source": bind["file"]})
-        self.commit_shortcuts(new_state, f"✓ Turned off {shortcuts.combo_label(bind['combo'])}. "
-                                         "Turn it on again any time.")
+        self.commit_shortcuts(new_state, _("✓ Turned off {0}. Turn it on again any time.").format(
+            shortcuts.combo_label(bind['combo'])))
 
     def restore_external_shortcut(self, combo):
         new_state = copy.deepcopy(self.shortcut_state)
         cid = shortcuts.combo_id(combo)
         entry = self.shortcut_entry(new_state)
         entry["disabled"] = [c for c in entry["disabled"] if shortcuts.combo_id(c) != cid]
-        self.commit_shortcuts(new_state, f"✓ {shortcuts.combo_label(combo)} is on again.")
+        self.commit_shortcuts(new_state, _("✓ {0} is on again.").format(shortcuts.combo_label(combo)))
 
     def set_hidden(self, app, hidden):
         mode = "plugins" if is_widget(app) else "apps"
@@ -2549,12 +2728,15 @@ class Launcher(Gtk.Application):
     def update_title(self):
         if not hasattr(self, "title"):
             return
+        if hasattr(self, "stack") and self.settings_open():
+            self.title.set_label(_("Settings").upper())
+            return
         if getattr(self, "shortcut_app", None) is not None:
             self.title.set_label(self.shortcut_app["name"])
             return
-        label = "Widgets & Plugins" if self.mode == "plugins" else "Apps"
+        label = _("Widgets & Plugins") if self.mode == "plugins" else _("Apps")
         if self.show_hidden:
-            label += " (Showing Hidden)"
+            label += " (" + _("Showing hidden") + ")"
         if self.search_query:
             label += f" — {self.search_query}"
         self.title.set_label(label)
@@ -2565,19 +2747,19 @@ class Launcher(Gtk.Application):
         what = "plugins" if self.mode == "plugins" else "apps"
         if self.show_hidden:
             self.hidden_button.set_icon_name("view-conceal-symbolic")
-            self.hidden_button.set_tooltip_text(f"Hide hidden {what}")
+            self.hidden_button.set_tooltip_text(_("Hide hidden plugins") if what == "plugins" else _("Hide hidden apps"))
             self.hidden_button.add_css_class("launcher-toggle-active")
         else:
             self.hidden_button.set_icon_name("view-reveal-symbolic")
-            self.hidden_button.set_tooltip_text(f"Show hidden {what}")
+            self.hidden_button.set_tooltip_text(_("Show hidden plugins") if what == "plugins" else _("Show hidden apps"))
             self.hidden_button.remove_css_class("launcher-toggle-active")
         # The button shows where it leads, like the eye.
         if self.mode == "plugins":
             self.mode_button.set_icon_name("view-app-grid-symbolic")
-            self.mode_button.set_tooltip_text("Show apps (Tab)")
+            self.mode_button.set_tooltip_text(_("Show apps (Tab)"))
         else:
             self.mode_button.set_icon_name("application-x-addon-symbolic")
-            self.mode_button.set_tooltip_text("Show widgets & plugins (Tab)")
+            self.mode_button.set_tooltip_text(_("Show widgets & plugins (Tab)"))
         self.update_title()
 
     def toggle_hidden(self, *_args):
