@@ -257,6 +257,15 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn('{ launch = "/x/google-chrome.desktop:new-private-window" }', lua)
         self.assertEqual(shortcuts.shortcut_launch(["/a/b"], "x"), ["/a/b"])
 
+    def test_render_lua_unbinds_disabled_before_binding_reassigned_key(self):
+        state = {"apps": {
+            "files": {"name": "Files", "launch": ["/x/nautilus.desktop"], "disabled": [],
+                      "shortcuts": [{"mods": ["SUPER", "SHIFT"], "key": "F", "replaces": "", "action": ""}]},
+            "flea": {"name": "Flea", "launch": ["/x/flea.desktop"], "shortcuts": [],
+                     "disabled": [{"mods": ["SUPER", "SHIFT"], "key": "F", "description": "File manager"}]}}}
+        lua = shortcuts.render_lua(state)
+        self.assertLess(lua.rindex('hl.unbind("SUPER + SHIFT + F")'), lua.index('o.bind("SUPER + SHIFT + F"'))
+
     def test_prune_missing_drops_uninstalled_apps_only(self):
         tmp = Path(self.tmp.name)
         (tmp / "kept.desktop").write_text("")

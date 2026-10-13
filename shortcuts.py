@@ -896,12 +896,19 @@ def render_lua(state):
     lines = ["-- Managed by Launch & Bind (ubruckhaus.simple-launcher-for-fools).",
              "-- Edit shortcuts from the launcher; manual changes here are overwritten.", ""]
     sequences = {}  # first step id -> (first step, [(entry, combo, command)])
-    for app_id in sorted(state["apps"], key=lambda k: state["apps"][k]["name"].casefold()):
-        entry = state["apps"][app_id]
-        for combo in entry["disabled"]:
-            note = f" (was: {combo['description']})" if combo.get("description") else ""
-            lines.append(lua_comment(f"{entry['name']}: disabled{note}"))
-            lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
+    apps = [state["apps"][k] for k in sorted(state["apps"], key=lambda k: state["apps"][k]["name"].casefold())]
+    # Disabled bindings are unbound before any shortcut is bound, so a key
+    # disabled for one app and reassigned to another stays bound.
+    disabled = [(entry, combo) for entry in apps for combo in entry["disabled"]]
+    for entry, combo in disabled:
+        note = f" (was: {combo['description']})" if combo.get("description") else ""
+        lines.append(lua_comment(f"{entry['name']}: disabled{note}"))
+        lines.append(f"hl.unbind({lua_string(combo_string(combo))})")
+    if disabled:
+        lines.append("")
+    for entry in apps:
+        if not entry["shortcuts"]:
+            continue
         for combo in entry["shortcuts"]:
             command = " ".join(shlex.quote(a) for a in shortcut_launch(entry["launch"], combo.get("action", "")))
             if combo.get("then"):
