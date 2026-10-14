@@ -257,6 +257,50 @@ class ShortcutTests(unittest.TestCase):
         self.assertIn('{ launch = "/x/google-chrome.desktop:new-private-window" }', lua)
         self.assertEqual(shortcuts.shortcut_launch(["/a/b"], "x"), ["/a/b"])
 
+    def test_invalid_desktop_ids_launch_through_a_valid_alias(self):
+        # uwsm-app notifies "Invalid Desktop Entry ID" for names like Omarchy's
+        # "Google Maps.desktop"; a symlink with a valid name avoids it.
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", Path(tmp) / "ids"):
+            entry = Path(tmp) / "Google Maps.desktop"
+            entry.write_text("[Desktop Entry]\n")
+            alias = shortcuts.uwsm_desktop_arg(str(entry))
+            self.assertEqual(alias, str(Path(tmp) / "ids" / "Google-Maps.desktop"))
+            self.assertEqual(os.readlink(alias), str(entry))
+            self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), alias)
+            self.assertEqual(shortcuts.shortcut_launch([str(entry)], "new"), [f"{alias}:new"])
+            valid = str(Path(tmp) / "org.gnome.Nautilus.desktop")
+            self.assertEqual(shortcuts.uwsm_desktop_arg(valid), valid)
+            self.assertEqual(Path(shortcuts.uwsm_desktop_arg("/x/ éé.desktop")).name, "app.desktop")
+
+    def test_desktop_alias_needs_a_private_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            entry = Path(tmp) / "Google Maps.desktop"
+            entry.write_text("[Desktop Entry]\n")
+            real = Path(tmp) / "real"
+            real.mkdir()
+            linked = Path(tmp) / "linked"
+            linked.symlink_to(real)
+            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", linked):
+                self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), str(entry))
+            open_dir = Path(tmp) / "open"
+            open_dir.mkdir(mode=0o777)
+            open_dir.chmod(0o777)
+            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", open_dir):
+                self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), str(entry))
+            self.assertEqual(list(real.iterdir()) + list(open_dir.iterdir()), [])
+            # A planted file or link at the alias name is replaced, never followed.
+            own = Path(tmp) / "own"
+            own.mkdir(mode=0o700)
+            victim = Path(tmp) / "victim"
+            victim.write_text("keep")
+            (own / "Google-Maps.desktop").symlink_to(victim)
+            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", own):
+                alias = shortcuts.uwsm_desktop_arg(str(entry))
+            self.assertEqual(os.readlink(alias), str(entry))
+            self.assertEqual(victim.read_text(), "keep")
+            self.assertEqual(sorted(p.name for p in own.iterdir()), ["Google-Maps.desktop"])
+
     def test_render_lua_unbinds_disabled_before_binding_reassigned_key(self):
         state = {"apps": {
             "files": {"name": "Files", "launch": ["/x/nautilus.desktop"], "disabled": [],
@@ -327,12 +371,12 @@ class ShortcutTests(unittest.TestCase):
 
     def test_render_lua_quotes_names_and_paths(self):
         state = {"apps": {"x": {"name": 'Evil "name"\nhl.exec_cmd("rm")',
-                                "launch": ["/tmp/a b/$(x).desktop"], "disabled": [],
+                                "launch": ["/tmp/a b $(x)/x.desktop"], "disabled": [],
                                 "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "E", "replaces": ""}]}}}
         lua = shortcuts.render_lua(state)
         self.assertIn('hl.unbind("SUPER + ALT + E")', lua)
         self.assertIn('"Evil \\"name\\"\\nhl.exec_cmd(\\"rm\\")"', lua)
-        self.assertIn("'/tmp/a b/$(x).desktop'", lua)
+        self.assertIn("'/tmp/a b $(x)/x.desktop'", lua)
         self.assertNotIn('\nhl.exec_cmd("rm")', lua)
 
     def test_render_lua_comments_cannot_be_broken(self):

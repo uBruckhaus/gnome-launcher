@@ -13,8 +13,10 @@ said yes to exactly that line (with a backup next to it).
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 from pathlib import Path
@@ -53,6 +55,43 @@ _TUI_RE = re.compile(r'\btui\s*=\s*"([^"]+)"')
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _URL_RE = re.compile(r'https?://[^\s"\']+')
 _PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+# uwsm-app warns (as a desktop notification) about desktop entries whose file
+# name is no valid Desktop Entry ID, such as Omarchy's "Google Maps.desktop".
+# Outside the applications directories uwsm takes the ID from the base name,
+# so such entries are launched through a symlink with a valid name.
+DESKTOP_ID_RE = re.compile(r"\A[A-Za-z0-9_][A-Za-z0-9_.-]*\.desktop\Z")
+DESKTOP_ALIAS_DIR = Path.home() / ".local/state/applauncher/desktop-ids"
+
+
+def uwsm_desktop_arg(desktop_path):
+    """The path to hand uwsm-app for a desktop file: the file itself, or a
+    symlink with a valid Desktop Entry ID when its own name is none."""
+    path = Path(desktop_path)
+    if DESKTOP_ID_RE.search(path.name):
+        return str(path)
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", path.name[:-len(".desktop")]).strip("-.") or "app"
+    if not re.match(r"[A-Za-z0-9_]", stem):
+        stem = f"app-{stem}"
+    alias = DESKTOP_ALIAS_DIR / f"{stem}.desktop"
+    try:
+        DESKTOP_ALIAS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Only a private directory of ours: no symlink, nobody else can write.
+        info = os.lstat(DESKTOP_ALIAS_DIR)
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)):
+            return str(path)
+        if alias.is_symlink() and os.readlink(alias) == str(path):
+            return str(alias)
+        tmp = DESKTOP_ALIAS_DIR / f".{stem}.{secrets.token_hex(8)}"
+        try:
+            tmp.symlink_to(path)  # fails instead of following anything already there
+            os.replace(tmp, alias)
+        finally:
+            tmp.unlink(missing_ok=True)
+        return str(alias)
+    except OSError:
+        return str(path)
 
 
 # --- combos ------------------------------------------------------------------
@@ -592,8 +631,9 @@ def app_launch_argv(app):
 
 def shortcut_launch(launch, action=""):
     """argv for a shortcut: the app, or one of its desktop actions."""
-    if action and len(launch) == 1 and launch[0].endswith(".desktop"):
-        return [f"{launch[0]}:{action}"]
+    if len(launch) == 1 and launch[0].endswith(".desktop"):
+        desktop = uwsm_desktop_arg(launch[0])
+        return [f"{desktop}:{action}"] if action else [desktop]
     if action and (tray_launch_id(launch) or is_self_toggle(launch)):
         return [*launch, action]
     return list(launch)

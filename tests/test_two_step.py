@@ -68,9 +68,9 @@ class TwoStepTests(unittest.TestCase):
 
     def test_render_lua_quotes_second_step_commands(self):
         st = state(("x", 'Evil "name"', SEQ_N))
-        st["apps"]["x"]["launch"] = ["/tmp/a b/$(x).desktop"]
+        st["apps"]["x"]["launch"] = ["/tmp/a b $(x)/x.desktop"]
         lua = shortcuts.render_lua(st)
-        self.assertIn("""hl.exec_cmd("uwsm-app -- '/tmp/a b/$(x).desktop'")""", lua)
+        self.assertIn("""hl.exec_cmd("uwsm-app -- '/tmp/a b $(x)/x.desktop'")""", lua)
         self.assertIn('description = "Evil \\"name\\""', lua)
 
     def test_state_keeps_second_key(self):

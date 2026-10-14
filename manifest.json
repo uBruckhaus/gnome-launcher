@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "App Manager",
-  "version": "1.9.1",
+  "version": "1.9.2",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Launch · Group · Bind · Inspect: all your apps and plugins in one theme-aware popup. Type to launch; pull it wide and the list becomes cards with a group bar to filter and drag apps between groups; sort apps into your own groups or by origin; give any app or action a global shortcut on a key map that shows who owns every key; open App info with path, package, size and website. Resize, move, double-click to maximize. Widgets, plugins and tray apps have their own page.",

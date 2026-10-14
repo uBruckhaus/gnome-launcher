@@ -17,6 +17,7 @@ from pathlib import Path
 import gi
 import i18n
 from i18n import _, ngettext
+from shortcuts import uwsm_desktop_arg
 
 # The interface language is stored next to the launcher's other files.
 i18n.SETTINGS_FILE = Path.home() / ".config/applauncher/settings.json"
@@ -1191,7 +1192,7 @@ def launch_app(app):
     if desktop_path and shutil.which("uwsm-app"):
         try:
             subprocess.Popen(
-                ["uwsm-app", "--", desktop_path],
+                ["uwsm-app", "--", uwsm_desktop_arg(desktop_path)],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
@@ -1221,7 +1222,7 @@ def launch_action(app, action_id):
     if desktop_path and shutil.which("uwsm-app"):
         try:
             subprocess.Popen(
-                ["uwsm-app", "--", f"{desktop_path}:{action_id}"],
+                ["uwsm-app", "--", f"{uwsm_desktop_arg(desktop_path)}:{action_id}"],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
