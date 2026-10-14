@@ -212,24 +212,84 @@ class RootDisplayAccessTests(unittest.TestCase):
 
 
 class AdminSettingTests(unittest.TestCase):
-    def test_off_by_default_and_switchable_keeping_other_settings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "settings.json"
-            self.assertFalse(launcher_core.admin_action_enabled(path))
-            path.write_text('{"language": "de", "shortcut_default_mods": ["SUPER"]}')
-            self.assertFalse(launcher_core.admin_action_enabled(path))
-            launcher_core.set_admin_action(True, path)
-            self.assertTrue(launcher_core.admin_action_enabled(path))
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-            launcher_core.set_admin_action(False, path)
-            self.assertFalse(launcher_core.admin_action_enabled(path))
-            data = __import__("json").loads(path.read_text())
-            self.assertEqual(data["language"], "de")
-            self.assertEqual(data["shortcut_default_mods"], ["SUPER"])
+    """The switch lives in the session's runtime folder and names the login
+    session that switched it on."""
+    TOKEN = "dab8fa73-b648-40a6-b29d-461d20fa0384:4:1791983558708583"
 
-    def test_only_a_real_true_enables_it(self):
+    def runtime(self, tmp, mode=0o700):
+        folder = Path(tmp) / "run"
+        folder.mkdir(mode=mode)
+        os.chmod(folder, mode)
+        return patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(folder)}), folder
+
+    def test_off_by_default_switchable_and_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env, folder = self.runtime(tmp)
+            with env:
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN))
+                launcher_core.set_admin_action(True, token=self.TOKEN)
+                self.assertTrue(launcher_core.admin_action_enabled(token=self.TOKEN))
+                flag = folder / launcher_core.ADMIN_FLAG_NAME
+                self.assertEqual(flag.stat().st_mode & 0o777, 0o600)
+                launcher_core.set_admin_action(False)
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN))
+                self.assertFalse(flag.exists())
+
+    def test_another_login_session_reads_it_as_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env, folder = self.runtime(tmp)
+            with env:
+                launcher_core.set_admin_action(True, token=self.TOKEN)
+                # Same runtime folder (it survives a logout), but a new login:
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN.replace(":4:", ":7:")))
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN[:-1] + "9"))
+                # No known session: off, and it cannot be switched on.
+                self.assertFalse(launcher_core.admin_action_enabled(token=""))
+                with patch.object(launcher_core, "session_token", return_value=None):
+                    self.assertFalse(launcher_core.admin_action_enabled())
+                    with self.assertRaises(OSError):
+                        launcher_core.set_admin_action(True)
+
+    def test_untrusted_places_never_enable_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env, folder = self.runtime(tmp)
+            with env:
+                target = Path(tmp) / "elsewhere"
+                target.write_text(self.TOKEN)
+                (folder / launcher_core.ADMIN_FLAG_NAME).symlink_to(target)
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN))   # a symlink is not our flag
+            shared = Path(tmp) / "shared"
+            shared.mkdir(mode=0o777)
+            os.chmod(shared, 0o777)
+            (shared / launcher_core.ADMIN_FLAG_NAME).write_text(self.TOKEN)
+            with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(shared)}):
+                self.assertFalse(launcher_core.admin_action_enabled(token=self.TOKEN))   # others can write there
+                with self.assertRaises(OSError):
+                    launcher_core.set_admin_action(True, token=self.TOKEN)
+
+    def test_session_token_from_the_logind_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions, boot = Path(tmp) / "sessions", Path(tmp) / "boot_id"
+            sessions.mkdir()
+            boot.write_text("dab8fa73-b648-40a6-b29d-461d20fa0384\n")
+            record = f"UID={os.getuid()}\nSTATE=active\nREALTIME=1791983558708583\n"
+            (sessions / "4").write_text(record)
+            with patch.dict(os.environ, {"XDG_SESSION_ID": "4"}):
+                self.assertEqual(launcher_core.session_token(sessions, boot, owner=os.getuid()), self.TOKEN)
+                self.assertIsNone(launcher_core.session_token(sessions, boot))           # not root-owned
+                (sessions / "4").write_text(record.replace("active", "closing"))
+                self.assertIsNone(launcher_core.session_token(sessions, boot, owner=os.getuid()))
+                (sessions / "4").write_text(record.replace(f"UID={os.getuid()}", "UID=0"))
+                self.assertIsNone(launcher_core.session_token(sessions, boot, owner=os.getuid()))
+            for sid in ("5", "../4", "", "4\n"):
+                with patch.dict(os.environ, {"XDG_SESSION_ID": sid}):
+                    self.assertIsNone(launcher_core.session_token(sessions, boot, owner=os.getuid()), sid)
+
+    def test_the_old_saved_switch_is_dropped(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "settings.json"
-            for text in ('{"admin_action": "yes"}', '{"admin_action": 1}', "not json", "[]"):
-                path.write_text(text)
-                self.assertFalse(launcher_core.admin_action_enabled(path), text)
+            path.write_text('{"admin_action": true, "language": "de"}')
+            launcher_core.forget_saved_admin_action(path)
+            data = __import__("json").loads(path.read_text())
+            self.assertEqual(data, {"language": "de"})
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)

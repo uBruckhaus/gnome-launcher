@@ -8,6 +8,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -58,13 +59,134 @@ def _save_setting(key, value, path=None):
         raise
 
 
-def admin_action_enabled(path=None):
-    """'Open as administrator' in the app menu is opt-in (Settings)."""
-    return _load_settings(path).get("admin_action") is True
+ADMIN_FLAG_NAME = "app-manager-admin-action"
 
 
-def set_admin_action(enabled, path=None):
-    _save_setting("admin_action", bool(enabled), path)
+def _session_dir():
+    """The login session's private runtime folder ($XDG_RUNTIME_DIR), or None
+    unless it is a real folder of ours that nobody else can enter. It is
+    emptied when the user logs out."""
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime or not os.path.isabs(runtime):
+        return None
+    try:
+        info = os.lstat(runtime)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        return None
+    return Path(runtime)
+
+
+def _admin_flag(path=None):
+    if path is not None:
+        return Path(path)
+    folder = _session_dir()
+    return folder / ADMIN_FLAG_NAME if folder else None
+
+
+SESSIONS_DIR = Path("/run/systemd/sessions")
+BOOT_ID_FILE = Path("/proc/sys/kernel/random/boot_id")
+
+
+def session_token(sessions=SESSIONS_DIR, boot_id_file=BOOT_ID_FILE, owner=0):
+    """Who switched "Open as administrator" on: this boot, this login session
+    and the session's start time, from systemd-logind's record of it
+    (root-owned, removed at logout). None when that is not known. The runtime
+    folder alone is not enough: it outlives a logout while user services keep
+    the user's systemd instance running."""
+    sid = os.environ.get("XDG_SESSION_ID", "")
+    if not re.fullmatch(r"[A-Za-z0-9]{1,32}", sid):
+        return None
+    record = Path(sessions) / sid
+    try:
+        info = os.lstat(record)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != owner:
+            return None
+        with open(record, "rb") as fh:
+            fields = dict(line.split("=", 1) for line in fh.read(64 * 1024).decode("utf-8", "replace").splitlines()
+                          if "=" in line)
+        with open(boot_id_file, "rb") as fh:
+            boot = fh.read(64).decode("ascii", "replace").strip()
+    except OSError:
+        return None
+    if fields.get("UID") != str(os.getuid()) or fields.get("STATE") not in ("active", "online"):
+        return None
+    started = fields.get("REALTIME", "")
+    if not re.fullmatch(r"[0-9]{1,20}", started) or not re.fullmatch(r"[0-9a-f-]{36}", boot):
+        return None
+    return f"{boot}:{sid}:{started}"
+
+
+def admin_action_enabled(path=None, token=None):
+    """'Open as administrator' in the app menu: opt-in, switched on only after
+    a password check, and only for the login session that did it. The marker
+    in the session's runtime folder names that session; any other session
+    (a new login, or after a reboot) reads it as off."""
+    flag = _admin_flag(path)
+    token = token if token is not None else session_token()
+    if flag is None or not token:
+        return False
+    try:
+        fd = os.open(flag, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return False
+        return os.read(fd, 256).decode("ascii", "replace").strip() == token
+    finally:
+        os.close(fd)
+
+
+def set_admin_action(enabled, path=None, token=None):
+    flag = _admin_flag(path)
+    if not enabled:
+        if flag is not None:
+            try:
+                os.unlink(flag)
+            except FileNotFoundError:
+                pass
+        return
+    token = token if token is not None else session_token()
+    if flag is None or not token:
+        raise OSError("no private session folder or login session to tie the setting to")
+    tmp = flag.with_name(f".{flag.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, token.encode("ascii"))
+        os.fsync(fd)
+        os.close(fd)
+        os.replace(tmp, flag)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def forget_saved_admin_action(path=None):
+    """Up to 1.7.x the switch was saved for good in settings.json; drop it."""
+    path = Path(path or SETTINGS_FILE)
+    data = _load_settings(path)
+    if "admin_action" in data:
+        del data["admin_action"]
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
 
 
 def running_first_enabled(path=None):

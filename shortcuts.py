@@ -338,6 +338,10 @@ def save_default_mods(mods):
     _atomic_write(SETTINGS_FILE, json.dumps(settings, indent=2) + "\n")
 
 
+SELF_KEY = "plugin:ubruckhaus.simple-launcher-for-fools"
+SELF_NAME = "App Manager"
+
+
 def load_state():
     try:
         data = json.loads(STATE_FILE.read_text())
@@ -368,7 +372,10 @@ def load_state():
                 disabled.append(combo)
         launch = entry.get("launch")
         if (shortcuts or disabled) and isinstance(launch, list) and launch and all(isinstance(a, str) for a in launch):
-            clean[str(app_id)] = {"name": str(entry.get("name", app_id))[:120], "launch": launch,
+            # The launcher's own entry keeps the name it had when its key was set
+            # (Simple Launcher, Launch & Bind); show the current one.
+            name = SELF_NAME if str(app_id) == SELF_KEY else str(entry.get("name", app_id))[:120]
+            clean[str(app_id)] = {"name": name, "launch": launch,
                                   "shortcuts": shortcuts, "disabled": disabled}
     return {"apps": clean}
 

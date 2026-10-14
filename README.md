@@ -39,6 +39,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 
 **Details.** **Details…** in an app's or plugin's `☰` menu shows what it is and where it lives: type, whether it came with Omarchy (installed with Omarchy, one of Omarchy's own web apps and launchers, or built into Omarchy) and what it is your default app for (web browser, terminal, email, files, text editor, …), group, ID, desktop file, command and program; for packages the pacman package, version, installed size, install date and website; for AppImages the file size and date; for plugins the version, author, licence, folder, size on disk and, for git checkouts, the source, commit and install date. Paths and addresses have a copy button.
 
+**Open as administrator, safer.** Switching it on now asks for your password, and it switches itself off at your next login (it is kept for the current session only, no longer in `settings.json`).
+
+**Steps aside for Omarchy's menus.** While App Manager is open, Super + Space (Omarchy's menu), the clipboard, emoji and image pickers, shell panels or Theme Manager open at the first press: App Manager watches Hyprland's event socket for those layers and closes itself. The Super key alone does nothing, so Super + drag still moves windows.
+
 **Running apps first.** The dot button at the front of the header puts running apps in a **Running** group on top; it is green while any app runs and grey otherwise.
 
 ## Changes in 1.5.0
@@ -120,7 +124,7 @@ Both are stored in `~/.config/applauncher/settings.json` (mode `0600`, written a
 
 ## Open as administrator (optional)
 
-Off by default. When you switch it on in the settings page, an app's actions menu gets **Open as administrator**. Nothing runs as root unless you choose that entry for one app and then enter your password.
+Off by default. When you switch it on in the settings page, an app's actions menu gets **Open as administrator**. Switching it on asks for your password first (polkit, through `pkexec /usr/bin/true`, which does nothing else), and it holds only for the current login: the switch is a marker file in your private session folder (`$XDG_RUNTIME_DIR`) that names the login session which switched it on (boot, session number and start time from systemd-logind). Any other session — after logging out and in again, or after a reboot — reads it as off. Switching it off needs no password. Nothing runs as root unless you choose that entry for one app and then enter your password again.
 
 - **Graphical apps** start through `pkexec env … <app>`, so the password dialog is the session's polkit agent (built into the Omarchy shell). Only display and look variables are passed on: `WAYLAND_DISPLAY` (as an absolute socket path), `XDG_SESSION_TYPE`, `DISPLAY`, `XAUTHORITY`, scale and cursor sizes, Qt/GTK theme names and dark mode. Nothing that loads code (`LD_*`, `GTK_MODULES`, `QT_PLUGIN_PATH`, …) is passed.
 - **Electron apps** (detected by Chromium's files next to the binary) get `--no-sandbox`, which they need as root. When libX11 is available they open on Xwayland (`--ozone-platform=x11`), because some Electron apps show no window as root on Wayland. For that the launcher first allows **only the local `root` user** on your display, the same as `xhost +si:localuser:root` (called through libX11, no `xhost` needed); this lasts until you log out.

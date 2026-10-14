@@ -44,7 +44,7 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
-    plugin_manifests, set_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
+    plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
     icon_bytes,
 )
@@ -53,6 +53,7 @@ import i18n
 from i18n import _, N_, ngettext
 import details
 import groups
+from layer_watch import LayerWatch
 import pidfile
 import shortcuts
 import threading
@@ -250,6 +251,13 @@ class Launcher(Gtk.Application):
                                "plugins": load_hidden_apps(HIDDEN_PLUGINS_FILE)}
         self.show_hidden_by_mode = {"apps": False, "plugins": False}
         self.running_first = running_first_enabled()
+        self.admin_auth_pending = False
+        # Omarchy's menus (Super + Space, …) open underneath this popup: close for them.
+        self.layer_watch = LayerWatch("simple-launcher-for-fools", self.on_menu_opened)
+        try:
+            forget_saved_admin_action()
+        except OSError:
+            pass
         # "list" or "groups" (collapsible groups); apps and plugins (Tab) each
         # have their own groups.
         self.view = saved_view()
@@ -837,6 +845,7 @@ class Launcher(Gtk.Application):
         except Exception as e:
             print("Error refreshing list:", e, file=sys.stderr)
         self.window.present()
+        self.layer_watch.start()
         if self.mode == "apps":
             self.prefetch_plugins()
         # Restarted after a language change: back to where the user was.
@@ -852,7 +861,13 @@ class Launcher(Gtk.Application):
             return GLib.SOURCE_REMOVE
         GLib.idle_add(_focus)
 
+    def on_menu_opened(self, _name):
+        """Another menu wants the keyboard: get out of its way at once."""
+        if self.window and self.window.get_visible() and not self.admin_auth_pending:
+            self.hide()
+
     def hide(self):
+        self.layer_watch.stop()
         if self.actions_menu_open():
             self.actions_popover.popdown()
         if self.aux_page_open():
@@ -1006,6 +1021,9 @@ class Launcher(Gtk.Application):
 
     def hide_if_inactive(self):
         if self.actions_menu_open():
+            return GLib.SOURCE_REMOVE
+        # The password dialog for "Open as administrator" has the focus.
+        if getattr(self, "admin_auth_pending", False):
             return GLib.SOURCE_REMOVE
         # Just opened a website from the details page: the browser has the focus.
         if time.monotonic() < getattr(self, "keep_open_until", 0):
@@ -2443,7 +2461,7 @@ class Launcher(Gtk.Application):
         grid.attach(label(_("Language"), _("The launcher restarts in the new language.")), 0, 0, 1, 1)
         grid.attach(dropdown, 1, 0, 1, 1)
 
-        admin_tip = _("Adds “Open as administrator” to an app's menu. It asks for your password every time.")
+        admin_tip = _("Adds “Open as administrator” to an app's menu. Switching it on asks for your password; it is off again after you log in next time.")
         admin_switch = Gtk.Switch(active=admin_action_enabled(), halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
         admin_switch.add_css_class("launcher-compact-switch")
         admin_switch.set_tooltip_text(admin_tip)
@@ -2467,11 +2485,57 @@ class Launcher(Gtk.Application):
         os.environ["SIMPLE_LAUNCHER_PAGE"] = "settings"
         self.restart(self.mode)
 
+    def set_admin_switch(self, active):
+        """Move the switch without treating it as the user's choice."""
+        self.admin_syncing = True
+        self.admin_switch.set_active(active)
+        self.admin_syncing = False
+
     def on_admin_action_toggled(self, switch, _param):
+        if getattr(self, "admin_syncing", False):
+            return
+        if not switch.get_active():
+            try:
+                set_admin_action(False)
+            except OSError as error:
+                self.notify(_("Could not save the setting"), str(error))
+            return
+        # Switching on needs the password first: the switch stays off until
+        # polkit says yes (pkexec runs only /usr/bin/true, which does nothing).
+        self.set_admin_switch(False)
+        if self.admin_auth_pending:
+            return
+        if not shutil.which("pkexec") or not os.access("/usr/bin/true", os.X_OK):
+            self.notify(_("Open as administrator was not switched on"), _("Not authorized, or no polkit agent is running."))
+            return
         try:
-            set_admin_action(switch.get_active())
-        except OSError as error:
-            self.notify(_("Could not save the setting"), str(error))
+            process = Gio.Subprocess.new(["pkexec", "/usr/bin/true"],
+                                         Gio.SubprocessFlags.STDOUT_SILENCE | Gio.SubprocessFlags.STDERR_SILENCE)
+        except GLib.Error as error:
+            self.notify(_("Open as administrator was not switched on"), error.message)
+            return
+        self.admin_auth_pending = True
+        switch.set_sensitive(False)
+
+        def done(proc, result):
+            self.admin_auth_pending = False
+            switch.set_sensitive(True)
+            try:
+                proc.wait_finish(result)
+                ok = proc.get_successful()
+            except GLib.Error:
+                ok = False
+            if not ok:
+                self.notify(_("Open as administrator was not switched on"),
+                            _("The password was not confirmed."))
+                return
+            try:
+                set_admin_action(True)
+            except OSError as error:
+                self.notify(_("Could not save the setting"), str(error))
+                return
+            self.set_admin_switch(True)
+        process.wait_async(None, done)
 
     def settings_open(self):
         return self.stack.get_visible_child_name() == "settings"
@@ -2485,6 +2549,7 @@ class Launcher(Gtk.Application):
         self.title.add_css_class("launcher-section-title")
         self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
         self.hide_main_header()
+        self.set_admin_switch(admin_action_enabled())  # Off again in a new session.
         self.stack.set_visible_child_name("settings")
         self.update_title()
         self.language_dropdown.grab_focus()
