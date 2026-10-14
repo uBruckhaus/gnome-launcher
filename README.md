@@ -28,6 +28,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 
+## Changes in 1.9.1
+
+**Typing to filter the cards keeps every group.** While you type, the cards show all matches and the group bar keeps every group (with the number of matches in it), so a card can be dragged to any of them; the group of the selected card is outlined. A chip clicked while typing narrows the matches to that group. Drop a card on a group while typing, and that group is shown once you clear the filter, with the card selected.
+
 ## Changes in 1.9.0
 
 **Resizable and movable.** Drag the grip in the bottom-right corner to resize; drag the header (hand cursor) to move the popup. Size and place are kept in `~/.config/applauncher/settings.json` (`size`, `position`); the card always stays on screen.

@@ -561,6 +561,7 @@ class Launcher(Gtk.Application):
         grid.set_row_spacing(TILE_SPACING)
         grid.set_column_spacing(TILE_SPACING)
         grid.connect("child-activated", lambda _g, tile: self.launch(tile.app, tile.actions_button))
+        grid.connect("selected-children-changed", lambda *_a: self.mark_selected_group())
         grid.set_vadjustment(grid_scroller.get_vadjustment())  # Keyboard moves scroll along.
         grid_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         grid_box.append(grid)
@@ -921,18 +922,26 @@ class Launcher(Gtk.Application):
         running = [a for a in entries if self.overview_running(a)]
         if running:
             result.append((groups.RUNNING, groups.display_name(groups.RUNNING, page=self.mode), running))
-        query = self.search_query.strip()
         for gid, members in groups.sections(entries, self.groups):
-            # Empty groups stay while browsing: something can be dragged in.
-            if members or (not query and gid != groups.OTHER):
+            # Every group stays, empty or not, also while searching: each is
+            # a place to drag a card to. Other only when something is in it
+            # or a card could go back there.
+            if members or gid != groups.OTHER or self.search_query.strip():
                 result.append((gid, groups.display_name(gid, self.groups, self.mode), members))
         return result
 
     def refresh_overview(self, entries, selected_id):
         sections = self.overview_sections(entries)
         wanted = self.overview_filter[self.mode]
+        if self.search_query.strip():
+            # A search looks through everything unless a chip is clicked
+            # during it; the chosen group comes back after it. The chips
+            # mark where the selected card belongs.
+            wanted = getattr(self, "search_filter", None) or "all"
+        else:
+            self.search_filter = None
         if wanted not in {gid for gid, _label, _members in sections}:
-            wanted = "all"  # The group emptied, or a search left nothing in it.
+            wanted = "all"
         self.fill_filter_bar(sections, wanted)
         members = next(m for gid, _label, m in sections if gid == wanted)
         if wanted == "all" and (self.mode == "plugins" or self.running_first):
@@ -970,6 +979,7 @@ class Launcher(Gtk.Application):
         while child := self.filter_chips.get_first_child():
             self.filter_chips.remove(child)
         self.filter_ids = []
+        self.filter_buttons = {}
         for gid, label, members in sections:
             button = Gtk.Button()
             button.add_css_class("flat")
@@ -1000,8 +1010,25 @@ class Launcher(Gtk.Application):
                 button.add_controller(menu_click)
             self.filter_chips.append(button)
             self.filter_ids.append(gid)
+            self.filter_buttons[gid] = button
         self.new_group_button.set_sensitive(len(self.groups["groups"]) < groups.MAX_GROUPS)
         GLib.idle_add(self.reveal_filter_chip)
+
+    def mark_selected_group(self):
+        """Outline the chip of the group the selected card is in."""
+        tile = self.selected_item() if self.overview else None
+        app = getattr(tile, "app", None)
+        gid = groups.group_of(app, self.groups) if app is not None and "tray_id" not in app else None
+        for chip_gid, button in getattr(self, "filter_buttons", {}).items():
+            if chip_gid == gid:
+                button.add_css_class("launcher-filter-current")
+                button.set_tooltip_text(_("{0} is in this group. Drag it onto another group to move it.").format(app["name"]))
+            elif button.has_css_class("launcher-filter-current"):
+                button.remove_css_class("launcher-filter-current")
+                button.set_tooltip_text(_("Show only this group (Ctrl+G: next group). Right click: rename, move or delete."))
+        if gid in getattr(self, "filter_buttons", {}) and self.search_query.strip():
+            self.filter_on_button = self.filter_buttons[gid]
+            GLib.idle_add(self.reveal_filter_chip)
 
     def reveal_filter_chip(self):
         button = getattr(self, "filter_on_button", None)
@@ -1033,6 +1060,10 @@ class Launcher(Gtk.Application):
         return True
 
     def set_overview_filter(self, gid):
+        if self.search_query.strip():
+            self.search_filter = gid  # For this search only.
+            self.refresh_list(selected_id=self.row_key(self.selected_item()))
+            return
         if self.overview_filter[self.mode] == gid:
             return
         self.overview_filter[self.mode] = gid
@@ -1041,7 +1072,8 @@ class Launcher(Gtk.Application):
 
     def next_overview_filter(self, step=1):
         ids = getattr(self, "filter_ids", None) or ["all"]
-        current = self.overview_filter[self.mode]
+        current = ((getattr(self, "search_filter", None) or "all") if self.search_query.strip()
+                   else self.overview_filter[self.mode])
         position = ids.index(current) if current in ids else 0
         self.set_overview_filter(ids[(position + step) % len(ids)])
 
@@ -1190,6 +1222,10 @@ class Launcher(Gtk.Application):
             # After the drop has finished: the name page takes the keyboard.
             GLib.idle_add(lambda: self.open_group_name_page(None, app) and False)
         else:
+            if self.search_query.strip():
+                # Dropped while typing to filter: once the filter is cleared,
+                # show the group it went to, with the card selected.
+                self.overview_filter[self.mode] = gid
             self.put_in_group(app, gid)
         return True
 
@@ -1498,6 +1534,10 @@ class Launcher(Gtk.Application):
             background: {colors['accent']}; border-color: {colors['accent']};
         }}
         .launcher-card button.launcher-filter-chip.launcher-filter-on label {{ color: {colors['background']}; font-weight: 600; }}
+        /* The selected card's group: an accent outline and an underline. */
+        .launcher-card button.launcher-filter-chip.launcher-filter-current {{
+            border: 2px solid {colors['accent']}; box-shadow: inset 0 -2px {colors['accent']};
+        }}
         .launcher-header-hint {{ font-size: 10px; color: {dim_hex}; }}
         .launcher-filter-dragging button.launcher-filter-group {{ border-style: dashed; border-color: {colors['accent']}; }}
         .launcher-card button.launcher-filter-chip.launcher-filter-drop {{ background: alpha({colors['accent']}, 0.45); }}

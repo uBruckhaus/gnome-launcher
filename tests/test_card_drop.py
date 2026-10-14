@@ -26,6 +26,9 @@ class CardDropTests(unittest.TestCase):
         self.app = launcher_methods("own_card_drag", "on_chip_drop", "on_tile_drag_begin", "on_tile_drag_end")()
         self.app.put_in_group = Mock()
         self.app.filter_bar = Mock()
+        self.app.search_query = ""
+        self.app.mode = "apps"
+        self.app.overview_filter = {"apps": "all", "plugins": "all"}
 
     def test_foreign_drop_is_refused_without_reading_it(self):
         drop = Mock()
@@ -44,6 +47,18 @@ class CardDropTests(unittest.TestCase):
         drop.read_async.assert_not_called()
         self.app.on_tile_drag_end()
         self.assertFalse(self.app.own_card_drag(drop))
+
+    def test_drop_while_typing_shows_the_group_afterwards(self):
+        card = {"desktop_id": "vlc", "name": "VLC"}
+        self.app.search_query = "vl"
+        self.app.on_tile_drag_begin(Mock(), Mock(), card)
+        self.app.on_chip_drop(None, Mock(), 0, 0, "media")
+        self.assertEqual(self.app.overview_filter["apps"], "media")
+
+    def test_drop_without_typing_keeps_the_filter(self):
+        self.app.on_tile_drag_begin(Mock(), Mock(), {"desktop_id": "vlc", "name": "VLC"})
+        self.app.on_chip_drop(None, Mock(), 0, 0, "media")
+        self.assertEqual(self.app.overview_filter["apps"], "all")
 
     def test_tray_icons_have_no_group(self):
         self.app.on_tile_drag_begin(Mock(), Mock(), {"desktop_id": "x", "tray_id": "x"})
