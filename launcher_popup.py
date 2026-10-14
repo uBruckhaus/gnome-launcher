@@ -44,6 +44,7 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
+    saved_size, set_saved_size, saved_position, set_saved_position,
     plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
     icon_bytes,
@@ -61,6 +62,23 @@ import tray
 
 # Height of the app list and the shortcut page, whatever they hold.
 LIST_HEIGHT = 590
+CARD_WIDTH = 420
+MIN_LIST_HEIGHT = 300
+# Resized wide enough for two cards side by side, the list turns into the
+# overview: cards in columns, filtered by group in a bar at the bottom.
+TILE_WIDTH = 196       # A card's narrowest width.
+TILE_MAX_WIDTH = 240   # The widest it gets: limits the popup's width.
+TILE_SPACING = 10
+MAX_COLUMNS = 6
+DRAG_PREFIX = "app-manager-entry:"  # A card dragged onto a group chip.
+CARD_PADDING = 34      # The card's padding, left and right.
+MAX_CARD_WIDTH = CARD_PADDING + MAX_COLUMNS * TILE_MAX_WIDTH + (MAX_COLUMNS - 1) * TILE_SPACING
+
+
+def grid_columns(card_width):
+    """Card columns at this popup width; 1 means the list."""
+    inner = card_width - CARD_PADDING
+    return max(1, min(MAX_COLUMNS, (inner + TILE_SPACING) // (TILE_WIDTH + TILE_SPACING)))
 
 # Where each browser lists its installed web apps.
 APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
@@ -261,6 +279,16 @@ class Launcher(Gtk.Application):
         # "list" or "groups" (collapsible groups); apps and plugins (Tab) each
         # have their own groups.
         self.view = saved_view()
+        # The overview (popup resized to two or more columns): the same
+        # entries as cards, one group (or all) at a time, picked in the
+        # filter bar at the bottom. The filter is per page, like the groups.
+        self.overview = False
+        self.overview_filter = {"apps": "all", "plugins": "all"}
+        self.height_pages = []  # Sub-pages as high as the list.
+        self.card_w, self.list_h = CARD_WIDTH, LIST_HEIGHT
+        self.resize_start = None
+        self.position = saved_position()  # Top-left after a move by the header; None: centred.
+        self.move_start = None
         self.groups_all = groups.load()
         self.group_name_target = None  # (group id or None, app to put in it or None)
         self.details_token = 0
@@ -343,17 +371,40 @@ class Launcher(Gtk.Application):
         click = Gtk.GestureClick()
         click.connect("released", self.on_overlay_click)  # Close on release so the bar never sees a half-finished click.
         overlay.add_controller(click)
+        # Resizing: the grip in the card's corner. The drag is tracked on the
+        # full-screen overlay, which stays put while the card grows around
+        # its centre (the grip moves with the card).
+        sizer = Gtk.GestureDrag()
+        sizer.connect("drag-begin", self.on_resize_begin)
+        sizer.connect("drag-update", self.on_resize_update)
+        sizer.connect("drag-end", self.on_resize_end)
+        overlay.add_controller(sizer)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class("launcher-card")
-        card.set_size_request(420, -1)
-        card.set_halign(Gtk.Align.CENTER)
-        card.set_valign(Gtk.Align.CENTER)
-        card.set_margin_top(24)
-        card.set_margin_bottom(24)
-        overlay.add_overlay(card)
+        card.set_size_request(CARD_WIDTH, -1)
+        frame = Gtk.Overlay()
+        frame.set_child(card)
+        frame.set_halign(Gtk.Align.CENTER)
+        frame.set_valign(Gtk.Align.CENTER)
+        frame.set_margin_top(24)
+        frame.set_margin_bottom(24)
+        grip = Gtk.Image.new_from_icon_name("pan-down-symbolic")
+        grip.add_css_class("launcher-grip")
+        grip.set_pixel_size(14)
+        grip.set_halign(Gtk.Align.END)
+        grip.set_valign(Gtk.Align.END)
+        grip.set_cursor_from_name("se-resize")
+        grip.set_tooltip_text(_("Drag to resize · double-click for the default size"))
+        frame.add_overlay(grip)
+        overlay.add_overlay(frame)
+        self.card_frame, self.grip = frame, grip
 
         header = Gtk.Box(spacing=8)
+        # Double-click the header: left goes back to the default size, right
+        # maximizes. The card always stays centred.
+        header_clicks = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        header_clicks.connect("pressed", self.on_header_click)
         back_button = Gtk.Button()
         back_button.set_tooltip_text(_("Back to apps (Esc)"))
         back_button.add_css_class("flat")
@@ -371,12 +422,29 @@ class Launcher(Gtk.Application):
         back_button.set_visible(False)
         back_button.connect("clicked", lambda *_: self.close_subpage())
         self.back_chip = esc
-        header.append(back_button)
+        title_side = Gtk.Box(spacing=8)  # Back button and title, left of the hint.
+        title_side.append(back_button)
         title = Gtk.Label(label=_("Apps"))
         title.add_css_class("launcher-title")
-        title.set_hexpand(True)
-        title.set_halign(Gtk.Align.START)
-        header.append(title)
+        # FILL + xalign 0, not START: START gives the label only its natural
+        # width, which GTK measures too short for letter-spaced section titles.
+        title.set_xalign(0)
+        title.set_halign(Gtk.Align.FILL)
+        title.set_ellipsize(3)
+        title.set_valign(Gtk.Align.CENTER)
+        title_side.append(title)
+        # Small, centred between the title and the header buttons: what the
+        # mouse does with the header. No natural width of its own (the full
+        # text would widen the card): it takes the room left and ends in "…".
+        mouse_hint = Gtk.Label(xalign=0.5)
+        mouse_hint.add_css_class("launcher-header-hint")
+        mouse_hint.set_ellipsize(3)
+        mouse_hint.set_max_width_chars(1)
+        mouse_hint.set_hexpand(True)
+        mouse_hint.set_valign(Gtk.Align.CENTER)
+        mouse_hint.set_margin_start(6)
+        mouse_hint.set_margin_end(6)
+        self.mouse_hint = mouse_hint
         # App list only: running apps in a group of their own on top. A dot,
         # like the run dot on the icons (the play icon is the Open action).
         running_button = Gtk.Button(icon_name="media-record-symbolic")
@@ -424,7 +492,18 @@ class Launcher(Gtk.Application):
         settings_button.connect("clicked", lambda *_: self.open_settings_page())
         header.append(settings_button)
         self.settings_button = settings_button
-        card.append(header)
+        header_bar = Gtk.Box()
+        header_bar.append(title_side)
+        header_bar.append(mouse_hint)
+        header_bar.append(header)
+        header_bar.add_controller(header_clicks)
+        # Drag the header to move the card (Super + drag belongs to Hyprland,
+        # and a layer surface is not a window it moves). The drag itself is
+        # tracked on the overlay, see on_resize_begin.
+        header_bar.set_cursor_from_name("grab")
+        title.set_tooltip_text(_("Drag to move"))
+        card.append(header_bar)
+        self.header_bar = header_bar
 
         # Asks before deleting hand-written shortcuts of removed apps.
         question = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -470,6 +549,95 @@ class Launcher(Gtk.Application):
         rows.set_header_func(self.list_header)
         scroller.set_child(rows)
 
+        # The overview page: cards in as many columns as the card is wide.
+        grid_scroller = Gtk.ScrolledWindow()
+        grid_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
+        grid = Gtk.FlowBox()
+        grid.add_css_class("launcher-grid")
+        grid.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        grid.set_activate_on_single_click(True)
+        grid.set_homogeneous(True)
+        grid.set_valign(Gtk.Align.START)
+        grid.set_row_spacing(TILE_SPACING)
+        grid.set_column_spacing(TILE_SPACING)
+        grid.connect("child-activated", lambda _g, tile: self.launch(tile.app, tile.actions_button))
+        grid.set_vadjustment(grid_scroller.get_vadjustment())  # Keyboard moves scroll along.
+        grid_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        grid_box.append(grid)
+        empty = Gtk.Label(label=_("Nothing to show here"))
+        empty.add_css_class("sc-empty")
+        empty.set_margin_top(40)
+        empty.set_visible(False)
+        grid_box.append(empty)
+        grid_scroller.set_child(grid_box)
+        stack.add_named(grid_scroller, "overview")
+
+        # Under the overview: apps | plugins, then one button per group.
+        filter_bar = Gtk.Box(spacing=8)
+        filter_bar.add_css_class("launcher-filter-bar")
+        mode_switch = Gtk.Box()
+        mode_switch.add_css_class("linked")
+        mode_switch.add_css_class("launcher-view-switch")
+        self.mode_switch_buttons = {}
+        for mode, label in (("apps", _("Apps")), ("plugins", _("Plugins"))):
+            button = Gtk.Button(label=label)
+            button.add_css_class("flat")
+            button.add_css_class("launcher-filter-mode")
+            button.set_tooltip_text(_("Apps and plugins (Tab)"))
+            button.connect("clicked", lambda _b, m=mode: m != self.mode and self.toggle_mode())
+            mode_switch.append(button)
+            self.mode_switch_buttons[mode] = button
+        filter_bar.append(mode_switch)
+        # A new group: click to name it, or drop a card here to start it.
+        new_group = Gtk.Button()
+        new_group.add_css_class("flat")
+        new_group.add_css_class("launcher-filter-chip")
+        new_group.add_css_class("launcher-filter-new")
+        new_group.set_valign(Gtk.Align.CENTER)
+        new_box = Gtk.Box(spacing=4)
+        new_box.append(Gtk.Image.new_from_icon_name("list-add-symbolic"))
+        new_box.append(Gtk.Label(label=_("New group")))
+        new_group.set_child(new_box)
+        new_group.set_tooltip_text(_("New group (or drop a card here to start one with it)"))
+        new_group.set_focus_on_click(False)
+        new_group.connect("clicked", lambda *_a: self.open_group_name_page(None))
+        self.add_chip_drop(new_group, None)
+        filter_bar.append(new_group)
+        self.new_group_button = new_group
+        chips_scroller = Gtk.ScrolledWindow()
+        # More groups than fit: the row scrolls (wheel, touchpad, the thin
+        # scrollbar or the ‹ › buttons, which show only then).
+        chips_scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        chips_scroller.set_hexpand(True)
+        chips = Gtk.Box(spacing=6)
+        chips.set_margin_bottom(4)  # Room for the overlay scrollbar.
+        chips_scroller.set_child(chips)
+        # The mouse wheel scrolls the row of groups sideways.
+        wheel = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
+        wheel.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        wheel.connect("scroll", self.on_filter_wheel)
+        chips_scroller.add_controller(wheel)
+        self.filter_arrows = []
+        for step, icon in ((-1, "go-previous-symbolic"), (1, "go-next-symbolic")):
+            arrow = Gtk.Button(icon_name=icon)
+            arrow.add_css_class("flat")
+            arrow.add_css_class("launcher-header-btn")
+            arrow.set_valign(Gtk.Align.CENTER)
+            arrow.set_focus_on_click(False)
+            arrow.connect("clicked", lambda _b, d=step: self.scroll_filter_bar(d))
+            self.filter_arrows.append(arrow)
+        filter_bar.append(self.filter_arrows[0])
+        filter_bar.append(chips_scroller)
+        filter_bar.append(self.filter_arrows[1])
+        adjustment = chips_scroller.get_hadjustment()
+        for signal_name in ("changed", "value-changed"):
+            # Not during the layout pass that changed it: showing the arrows resizes.
+            adjustment.connect(signal_name, lambda *_a: GLib.idle_add(self.update_filter_arrows))
+        filter_bar.set_visible(False)
+        card.append(filter_bar)
+        self.grid, self.grid_scroller, self.grid_empty = grid, grid_scroller, empty
+        self.filter_bar, self.filter_chips, self.filter_scroller = filter_bar, chips, chips_scroller
+
         keys = Gtk.EventControllerKey()
         keys.connect("key-pressed", self.on_key)
         window.add_controller(keys)
@@ -490,6 +658,589 @@ class Launcher(Gtk.Application):
         self.build_group_name_page()
         self.build_details_page()
         self.apply_theme()
+        self.resize_to(*self.saved_card_size())
+        self.move_to(self.position)
+
+    # --- size and overview --------------------------------------------------------
+
+    def main_page(self):
+        return "overview" if self.overview else "list"
+
+    def main_page_open(self):
+        return self.stack.get_visible_child_name() in ("list", "overview")
+
+    def item_view(self):
+        """The widget holding the entries shown: the list or the card grid."""
+        return self.grid if self.overview else self.rows
+
+    def selected_item(self):
+        if self.overview:
+            selected = self.grid.get_selected_children()
+            return selected[0] if selected else None
+        return self.rows.get_selected_row()
+
+    @staticmethod
+    def default_card_size():
+        return CARD_WIDTH, LIST_HEIGHT
+
+    def saved_card_size(self):
+        return saved_size("size") or self.default_card_size()
+
+    def screen_size(self):
+        """The room the card has: the overlay fills the monitor (less the bar)."""
+        width, height = self.overlay.get_width(), self.overlay.get_height()
+        if width > 0 and height > 0:
+            return width, height
+        display = Gdk.Display.get_default()
+        monitors = display.get_monitors() if display is not None else None
+        monitor = monitors.get_item(0) if monitors is not None and monitors.get_n_items() else None
+        if monitor is not None:
+            geometry = monitor.get_geometry()
+            return geometry.width, geometry.height - 40
+        return 1920, 1040
+
+    def page_height(self):
+        return self.list_h
+
+    def resize_to(self, width, height, save=False):
+        """Card width and page height, within the screen. The overview shows
+        as many card columns as fit; sub-pages keep the same height so
+        switching pages never makes the card jump."""
+        screen_w, screen_h = self.screen_size()
+        self.card_w = max(CARD_WIDTH, min(int(width), screen_w - 48, MAX_CARD_WIDTH))
+        columns = grid_columns(self.card_w)
+        # Header, filter bar, padding and the 24 px margins around the card.
+        chrome = 150 if columns > 1 else 110
+        self.list_h = max(MIN_LIST_HEIGHT, min(int(height), screen_h - chrome))
+        max_w = max(CARD_WIDTH, min(screen_w - 48, MAX_CARD_WIDTH))
+        self.max_card_size = (max_w, max(MIN_LIST_HEIGHT, screen_h - (150 if grid_columns(max_w) > 1 else 110)))
+        self.card.set_size_request(self.card_w, -1)
+        for scroller in (self.scroller, self.grid_scroller):
+            # Raise the maximum first: GTK refuses a minimum above the maximum.
+            scroller.set_max_content_height(100000)
+            scroller.set_min_content_height(self.list_h)
+            scroller.set_max_content_height(self.list_h)
+        for page in self.height_pages:
+            if isinstance(page, Gtk.ScrolledWindow):
+                page.set_max_content_height(100000)
+                page.set_min_content_height(self.list_h)
+                page.set_max_content_height(self.list_h)
+            else:
+                page.set_size_request(-1, self.list_h)
+        if self.shortcut_app is not None:
+            self.sc_page.set_size_request(-1, self.list_h)
+        self.grid.set_min_children_per_line(columns)
+        self.grid.set_max_children_per_line(columns)
+        self.grid_columns = columns
+        if (columns > 1) != self.overview:
+            self.set_overview(columns > 1)
+        self.update_mouse_hint()
+        if save:
+            default = (self.card_w, self.list_h) == tuple(self.default_card_size())
+            try:
+                set_saved_size("size", None if default else (self.card_w, self.list_h))
+            except OSError as error:
+                self.notify(_("Could not save the setting"), str(error))
+
+    def on_header_click(self, gesture, count, _x, _y):
+        if count != 2:
+            return
+        button = gesture.get_current_button()
+        if button not in (Gdk.BUTTON_PRIMARY, Gdk.BUTTON_SECONDARY):
+            return
+        # At the smallest size either button maximizes, at the largest either
+        # one goes back; in between left = default size, right = maximize.
+        self.on_header_double_click(button)
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+
+    def on_header_double_click(self, button):
+        size = self.size_state()
+        if size == "max" or (size == "between" and button == Gdk.BUTTON_PRIMARY):
+            self.resize_to(*self.default_card_size(), save=True)
+        else:
+            self.resize_to(MAX_CARD_WIDTH, 100000, save=True)
+        self.move_to(None, save=True)  # Both sizes come back centred.
+
+    def size_state(self):
+        """"default", "max" or "between"."""
+        if (self.card_w, self.list_h) == tuple(self.default_card_size()):
+            return "default"
+        if (self.card_w, self.list_h) == tuple(getattr(self, "max_card_size", ())):
+            return "max"
+        return "between"
+
+    def update_mouse_hint(self):
+        if not hasattr(self, "mouse_hint"):
+            return
+        size = self.size_state()
+        self.mouse_hint.set_label(_("Double-click: maximize") if size == "default" else
+                                  _("Double-click: default size") if size == "max" else
+                                  _("Double-click: default size · right double-click: maximize"))
+        self.mouse_hint.set_tooltip_text(self.mouse_hint.get_label())
+
+    def on_resize_begin(self, gesture, x, y):
+        """A press on the full-screen overlay: the grip resizes, the header
+        (not its buttons) moves the card. Anywhere else is not ours."""
+        picked = self.overlay.pick(x, y, Gtk.PickFlags.DEFAULT)
+        if picked is not None and picked is not self.grip and self.on_header(picked):
+            self.begin_move(gesture)
+            return
+        if picked is not self.grip:
+            gesture.set_state(Gtk.EventSequenceState.DENIED)
+            return
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        # A second press on the grip within the double-click time: default size.
+        now = time.monotonic()
+        if now - getattr(self, "last_grip_press", 0.0) < 0.4:
+            self.last_grip_press = 0.0
+            self.resize_start = None
+            self.resized_at = now
+            self.resize_to(*self.default_card_size(), save=True)
+            return
+        self.last_grip_press = now
+        self.resize_start = (self.card_w, self.list_h)
+
+    def on_resize_update(self, _gesture, dx, dy):
+        if self.move_start is not None:
+            (x, y) = self.move_start
+            self.move_to((x + round(dx), y + round(dy)))
+            return
+        if self.resize_start is None:
+            return
+        width, height = self.resize_start
+        # Centred, the card grows by twice the pointer's way; moved, it grows
+        # right and down from its top-left corner.
+        factor = 1 if self.position is not None else 2
+        self.resize_to(width + factor * round(dx), height + factor * round(dy))
+
+    def on_resize_end(self, _gesture, _dx, _dy):
+        if self.move_start is not None:
+            self.move_start = None
+            self.resized_at = time.monotonic()
+            self.header_bar.set_cursor_from_name("grab")
+            self.move_to(self.position, save=True)
+            return
+        if self.resize_start is None:
+            return
+        self.resize_start = None
+        self.resized_at = time.monotonic()
+        self.resize_to(self.card_w, self.list_h, save=True)
+        GLib.idle_add(self.keep_on_screen)
+
+    def on_header(self, widget):
+        """True for the header bar or a label in it, not for its buttons."""
+        while widget is not None and widget is not self.header_bar:
+            if isinstance(widget, Gtk.Button):
+                return False
+            widget = widget.get_parent()
+        return widget is self.header_bar
+
+    def begin_move(self, gesture):
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        # A second left press within the double-click time: the header's
+        # double-click (a click gesture would lose the press to this drag).
+        now = time.monotonic()
+        if now - getattr(self, "last_header_press", 0.0) < 0.4:
+            self.last_header_press = 0.0
+            self.move_start = None
+            self.resized_at = now
+            self.on_header_double_click(Gdk.BUTTON_PRIMARY)
+            return
+        self.last_header_press = now
+        self.move_start = self.card_position()
+        self.header_bar.set_cursor_from_name("grabbing")
+
+    def keep_on_screen(self):
+        """Once laid out at its new size: a moved card stays fully on screen."""
+        if self.position is not None:
+            before = self.position
+            self.move_to(self.position)
+            if self.position != before:
+                self.move_to(self.position, save=True)
+        return GLib.SOURCE_REMOVE
+
+    def card_position(self):
+        """The card's top-left on the overlay, also while centred."""
+        if self.position is not None:
+            return self.position
+        ok, bounds = self.card_frame.compute_bounds(self.overlay)
+        if not ok:
+            return 0, 0
+        return round(bounds.get_x()), round(bounds.get_y())
+
+    def move_to(self, position, save=False):
+        """Put the card's top-left at position (kept on screen), or centre it for None."""
+        frame = self.card_frame
+        if position is not None:
+            screen_w, screen_h = self.screen_size()
+            frame_w, frame_h = frame.get_width(), frame.get_height()
+            position = (max(0, min(int(position[0]), screen_w - frame_w)),
+                        max(0, min(int(position[1]), screen_h - frame_h)))
+        self.position = position
+        if position is None:
+            frame.set_halign(Gtk.Align.CENTER)
+            frame.set_valign(Gtk.Align.CENTER)
+            frame.set_margin_start(0)
+            frame.set_margin_top(24)
+            frame.set_margin_bottom(24)
+        else:
+            frame.set_halign(Gtk.Align.START)
+            frame.set_valign(Gtk.Align.START)
+            frame.set_margin_start(position[0])
+            frame.set_margin_top(position[1])
+            frame.set_margin_bottom(0)
+        if save:
+            try:
+                set_saved_position(position)
+            except OSError as error:
+                self.notify(_("Could not save the setting"), str(error))
+
+    def set_overview(self, enabled):
+        """List (one column) or overview (cards): follows the popup's width.
+        Sub-pages stay open; they go back to whichever it is then."""
+        selected = self.row_key(self.selected_item()) if self.window is not None else None
+        self.overview = enabled
+        if self.window is None or not hasattr(self, "running_button"):
+            return
+        if self.main_page_open():
+            self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+            self.stack.set_visible_child_name(self.main_page())
+            self.stack.set_transition_type(Gtk.StackTransitionType.SLIDE_LEFT_RIGHT)
+            self.show_main_header()
+            self.refresh_list(selected_id=selected if selected and not selected.startswith("group:") else None)
+
+    def overview_running(self, app):
+        if self.mode == "plugins":
+            return "tray_id" in app
+        return self.app_state(app) != "stopped"
+
+    def overview_sections(self, entries):
+        """[(filter id, label, entries)] for the filter bar: all, running,
+        then the groups."""
+        result = [("all", _("All"), entries)]
+        running = [a for a in entries if self.overview_running(a)]
+        if running:
+            result.append((groups.RUNNING, groups.display_name(groups.RUNNING, page=self.mode), running))
+        query = self.search_query.strip()
+        for gid, members in groups.sections(entries, self.groups):
+            # Empty groups stay while browsing: something can be dragged in.
+            if members or (not query and gid != groups.OTHER):
+                result.append((gid, groups.display_name(gid, self.groups, self.mode), members))
+        return result
+
+    def refresh_overview(self, entries, selected_id):
+        sections = self.overview_sections(entries)
+        wanted = self.overview_filter[self.mode]
+        if wanted not in {gid for gid, _label, _members in sections}:
+            wanted = "all"  # The group emptied, or a search left nothing in it.
+        self.fill_filter_bar(sections, wanted)
+        members = next(m for gid, _label, m in sections if gid == wanted)
+        if wanted == "all" and (self.mode == "plugins" or self.running_first):
+            # Stable sort: running apps (tray icons) first, each part in the usual order.
+            members = sorted(members, key=lambda a: not self.overview_running(a))
+        while child := self.grid.get_first_child():
+            self.grid.remove(child)
+        selected = None
+        for app in members:
+            tile = self.make_tile(app)
+            self.grid.append(tile)
+            if selected is None and selected_id and app.get("desktop_id") == selected_id:
+                selected = tile
+        self.grid_empty.set_visible(not members)
+        selected = selected or self.grid.get_child_at_index(0)
+        if selected is not None:
+            self.grid.select_child(selected)
+            GLib.timeout_add(50, self.ensure_tile_visible, selected)
+
+    def ensure_tile_visible(self, tile):
+        if tile.get_parent() == self.grid and tile in self.grid.get_selected_children():
+            tile.grab_focus()
+            ok, bounds = tile.compute_bounds(self.grid)
+            if ok:
+                self.grid_scroller.get_vadjustment().clamp_page(
+                    bounds.get_y(), bounds.get_y() + bounds.get_height())
+        return GLib.SOURCE_REMOVE
+
+    def fill_filter_bar(self, sections, wanted):
+        for mode, button in self.mode_switch_buttons.items():
+            if mode == self.mode:
+                button.add_css_class("launcher-toggle-active")
+            else:
+                button.remove_css_class("launcher-toggle-active")
+        while child := self.filter_chips.get_first_child():
+            self.filter_chips.remove(child)
+        self.filter_ids = []
+        for gid, label, members in sections:
+            button = Gtk.Button()
+            button.add_css_class("flat")
+            button.add_css_class("launcher-filter-chip")
+            box = Gtk.Box(spacing=5)
+            if gid == groups.RUNNING:
+                dot = Gtk.Box()
+                dot.add_css_class("launcher-filter-dot")
+                dot.set_valign(Gtk.Align.CENTER)
+                box.append(dot)
+            box.append(Gtk.Label(label=label))
+            count = Gtk.Label(label=str(len(members)))
+            count.add_css_class("launcher-filter-count")
+            box.append(count)
+            button.set_child(box)
+            button.set_tooltip_text(_("Show everything (Ctrl+G: next group)") if gid == "all" else
+                                    _("Show only this group (Ctrl+G: next group)") if gid == groups.RUNNING else
+                                    _("Show only this group (Ctrl+G: next group). Right click: rename, move or delete."))
+            if gid == wanted:
+                button.add_css_class("launcher-filter-on")
+                self.filter_on_button = button
+            button.set_focus_on_click(False)
+            button.connect("clicked", lambda _b, g=gid: self.set_overview_filter(g))
+            if gid not in ("all", groups.RUNNING):
+                self.add_chip_drop(button, gid)
+                menu_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+                menu_click.connect("pressed", lambda *_a, b=button, g=gid: self.show_group_actions(b, g))
+                button.add_controller(menu_click)
+            self.filter_chips.append(button)
+            self.filter_ids.append(gid)
+        self.new_group_button.set_sensitive(len(self.groups["groups"]) < groups.MAX_GROUPS)
+        GLib.idle_add(self.reveal_filter_chip)
+
+    def reveal_filter_chip(self):
+        button = getattr(self, "filter_on_button", None)
+        if button is None or button.get_parent() != self.filter_chips:
+            return GLib.SOURCE_REMOVE
+        ok, bounds = button.compute_bounds(self.filter_chips)
+        if ok:
+            self.filter_scroller.get_hadjustment().clamp_page(
+                bounds.get_x() - 8, bounds.get_x() + bounds.get_width() + 8)
+        return GLib.SOURCE_REMOVE
+
+    def scroll_filter_bar(self, direction):
+        adjustment = self.filter_scroller.get_hadjustment()
+        adjustment.set_value(adjustment.get_value() + direction * adjustment.get_page_size() * 0.7)
+
+    def update_filter_arrows(self):
+        adjustment = self.filter_scroller.get_hadjustment()
+        overflow = adjustment.get_upper() - adjustment.get_page_size() > 1
+        value = adjustment.get_value()
+        self.filter_arrows[0].set_visible(overflow)
+        self.filter_arrows[1].set_visible(overflow)
+        self.filter_arrows[0].set_sensitive(value > 0.5)
+        self.filter_arrows[1].set_sensitive(value < adjustment.get_upper() - adjustment.get_page_size() - 0.5)
+        return GLib.SOURCE_REMOVE
+
+    def on_filter_wheel(self, _controller, dx, dy):
+        adjustment = self.filter_scroller.get_hadjustment()
+        adjustment.set_value(adjustment.get_value() + (dy or dx) * 40)
+        return True
+
+    def set_overview_filter(self, gid):
+        if self.overview_filter[self.mode] == gid:
+            return
+        self.overview_filter[self.mode] = gid
+        selected = self.row_key(self.selected_item())
+        self.refresh_list(selected_id=selected)
+
+    def next_overview_filter(self, step=1):
+        ids = getattr(self, "filter_ids", None) or ["all"]
+        current = self.overview_filter[self.mode]
+        position = ids.index(current) if current in ids else 0
+        self.set_overview_filter(ids[(position + step) % len(ids)])
+
+    def make_tile(self, app):
+        """One card of the overview: icon with the run dot, ☰ for the
+        actions (also right click), name, description, shortcut and badges."""
+        is_hidden = app["desktop_id"] in self.hidden_ids_for(app)
+        off_bar = bool(app.get("bar_widget")) and not app.get("in_bar")
+        tile = Gtk.FlowBoxChild()
+        tile.app = app
+        tile.add_css_class("launcher-tile")
+        if is_hidden or off_bar:
+            tile.add_css_class("launcher-row-hidden")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        top = Gtk.Box(spacing=6)
+        icon_name = app.get("icon") or "application-x-executable"
+        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
+        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
+        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
+        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+        icon.set_pixel_size(44)
+        if is_hidden or off_bar:
+            icon.add_css_class("launcher-hidden-icon")
+        icon_slot = Gtk.Overlay()
+        icon_slot.set_child(icon)
+        icon_slot.set_halign(Gtk.Align.START)
+        state = self.app_state(app)
+        if state != "stopped":
+            dot = Gtk.Box()
+            dot.add_css_class("launcher-run-dot")
+            dot.add_css_class(state)
+            dot.set_halign(Gtk.Align.END)
+            dot.set_valign(Gtk.Align.END)
+            dot.set_can_target(False)
+            icon_slot.add_overlay(dot)
+            icon_slot.set_tooltip_text(_("Open windows") if state == "active" else _("Running in background"))
+        top.append(icon_slot)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        top.append(spacer)
+        actions = Gtk.Button(icon_name="open-menu-symbolic")
+        actions.add_css_class("flat")
+        actions.add_css_class("launcher-tile-menu")
+        actions.set_valign(Gtk.Align.START)
+        actions.set_tooltip_text(_("Tray menu") if "tray_id" in app else
+                                 _("Plugin actions") if "plugin_id" in app else _("App actions"))
+        actions.connect("clicked", lambda button, target=app: self.show_actions(button, target))
+        top.append(actions)
+        box.append(top)
+
+        name = Gtk.Label(label=app["name"], xalign=0)
+        name.add_css_class("launcher-tile-name")
+        name.set_ellipsize(3)
+        box.append(name)
+        desc_text = app.get("description", "").strip()
+        desc = Gtk.Label(label=desc_text, xalign=0, yalign=0, wrap=True, lines=2)
+        desc.set_ellipsize(3)
+        desc.set_max_width_chars(1)  # Wrap at the card's width, not the text's.
+        desc.set_hexpand(True)
+        desc.add_css_class("launcher-app-desc")
+        desc.set_vexpand(True)
+        box.append(desc)
+
+        foot = Gtk.Box(spacing=4)
+        foot.set_size_request(-1, 18)
+        if is_hidden:
+            foot.append(self.tile_badge("view-conceal-symbolic", _("Hidden")))
+        if off_bar:
+            foot.append(self.tile_badge("list-remove-symbolic", _("Not in bar")))
+        assigned = self.app_shortcuts(app, self.list_bindings)
+        if assigned:
+            chip = Gtk.Label(label=shortcuts.combo_label(assigned[0]).replace(" + ", "+"))
+            chip.add_css_class("launcher-shortcut-chip")
+            chip.set_valign(Gtk.Align.CENTER)
+            chip.set_ellipsize(3)
+            foot.append(chip)
+            if len(assigned) > 1:
+                more = Gtk.Label(label=f"+{len(assigned) - 1}")
+                more.add_css_class("launcher-shortcut-more")
+                more.set_valign(Gtk.Align.CENTER)
+                foot.append(more)
+            foot.set_tooltip_text((_("Global shortcuts:") + "\n" if len(assigned) > 1 else _("Global shortcut:") + " ") + "\n".join(
+                shortcuts.combo_label(c) + (f" → {shortcuts.action_name(app, c['action'])}" if c["action"] else "")
+                for c in assigned))
+        box.append(foot)
+        tile.set_child(box)
+        tile.actions_button = actions
+        prefix = "[" + _("Hidden") + "] " if is_hidden else ""
+        tile.set_tooltip_text(f"{prefix}{app['name']} — {desc_text}" if desc_text else f"{prefix}{app['name']}")
+
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_a, t=tile: t not in self.grid.get_selected_children()
+                       and self.select_tile(t))
+        tile.add_controller(motion)
+        menu_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+        menu_click.connect("pressed", lambda *_a, t=tile: self.show_actions(t.actions_button, t.app))
+        tile.add_controller(menu_click)
+        if "tray_id" not in app:
+            # Drag the card onto a group in the filter bar to move it there.
+            drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+            drag.connect("prepare", lambda *_a, a=app: Gdk.ContentProvider.new_for_value(
+                DRAG_PREFIX + a["desktop_id"]))
+            drag.connect("drag-begin", lambda source, _d, i=icon, a=app: self.on_tile_drag_begin(source, i, a))
+            drag.connect("drag-end", lambda *_a: self.on_tile_drag_end())
+            tile.add_controller(drag)
+        return tile
+
+    def on_tile_drag_begin(self, source, icon, app):
+        self.tile_dragging = True
+        self.dragged_app = app
+        source.set_icon(Gtk.WidgetPaintable.new(icon), 22, 22)
+        self.filter_bar.add_css_class("launcher-filter-dragging")
+
+    def on_tile_drag_end(self):
+        self.tile_dragging = False
+        self.dragged_app = None
+        self.filter_bar.remove_css_class("launcher-filter-dragging")
+
+    def add_chip_drop(self, button, gid):
+        """Cards dropped on the chip move to group gid (None: a new group).
+        Only drags that started on one of our own cards are accepted, and the
+        offered data is never read: the card being dragged is known already.
+        (A plain DropTarget would buffer whatever another app offers, unbounded.)"""
+        target = Gtk.DropTargetAsync.new(None, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        target.connect("accept", lambda _t, drop: self.own_card_drag(drop))
+        # Hyprland preselects MOVE: accept both, or the drop is refused.
+        target.connect("drag-enter", lambda *_a, b=button: b.add_css_class("launcher-filter-drop") or Gdk.DragAction.COPY)
+        target.connect("drag-motion", lambda *_a: Gdk.DragAction.COPY)
+        target.connect("drag-leave", lambda *_a, b=button: b.remove_css_class("launcher-filter-drop"))
+        target.connect("drop", self.on_chip_drop, gid)
+        button.add_controller(target)
+        button.add_css_class("launcher-filter-group")
+
+    def own_card_drag(self, _drop):
+        """Only while one of our cards is being dragged (there is one pointer:
+        no other app's drag can be under it at the same time)."""
+        return getattr(self, "tile_dragging", False) and getattr(self, "dragged_app", None) is not None
+
+    def on_chip_drop(self, _target, drop, _x, _y, gid):
+        app = getattr(self, "dragged_app", None)
+        if not self.own_card_drag(drop) or app is None or "tray_id" in app:
+            drop.finish(0)
+            return False
+        drop.finish(Gdk.DragAction.COPY)
+        if gid is None:
+            # After the drop has finished: the name page takes the keyboard.
+            GLib.idle_add(lambda: self.open_group_name_page(None, app) and False)
+        else:
+            self.put_in_group(app, gid)
+        return True
+
+    @staticmethod
+    def tile_badge(icon_name, text):
+        badge = Gtk.Box(spacing=3)
+        badge.add_css_class("launcher-hidden-badge")
+        badge.set_valign(Gtk.Align.CENTER)
+        image = Gtk.Image.new_from_icon_name(icon_name)
+        image.set_pixel_size(11)
+        badge.append(image)
+        badge.append(Gtk.Label(label=text))
+        return badge
+
+    def select_tile(self, tile):
+        if tile is not None:
+            self.grid.select_child(tile)
+            tile.grab_focus()
+
+    def overview_key(self, key, state):
+        """Arrows, Home/End and Page keys in the card grid. True when handled."""
+        tiles = []
+        child = self.grid.get_first_child()
+        while child is not None:
+            tiles.append(child)
+            child = child.get_next_sibling()
+        if not tiles:
+            return False
+        current = self.selected_item()
+        position = tiles.index(current) if current in tiles else 0
+        columns = max(1, getattr(self, "grid_columns", 1))
+        page = columns * max(1, self.list_h // 170)
+        moves = {Gdk.KEY_Left: -1, Gdk.KEY_KP_Left: -1, Gdk.KEY_Right: 1, Gdk.KEY_KP_Right: 1,
+                 Gdk.KEY_Up: -columns, Gdk.KEY_KP_Up: -columns, Gdk.KEY_Down: columns, Gdk.KEY_KP_Down: columns,
+                 Gdk.KEY_Page_Up: -page, Gdk.KEY_KP_Page_Up: -page,
+                 Gdk.KEY_Page_Down: page, Gdk.KEY_KP_Page_Down: page}
+        if key in (Gdk.KEY_Home, Gdk.KEY_KP_Home):
+            target = 0
+        elif key in (Gdk.KEY_End, Gdk.KEY_KP_End):
+            target = len(tiles) - 1
+        elif key in moves:
+            target = position + moves[key]
+            if abs(moves[key]) > 1:
+                target = max(0, min(target, len(tiles) - 1))
+            elif not 0 <= target < len(tiles):
+                return True
+        else:
+            return False
+        self.select_tile(tiles[target])
+        self.ensure_tile_visible(tiles[target])
+        return True
 
     def apply_theme(self):
         colors = self.theme.colors
@@ -715,6 +1466,44 @@ class Launcher(Gtk.Application):
             background: rgba(147, 147, 195, 0.25);
             border-radius: {radius}px;
         }}
+        /* Resize grip in the card's corner. */
+        .launcher-grip {{ color: {muted_hex}; margin: 4px; opacity: 0.6; }}
+        .launcher-grip:hover {{ color: {colors['accent']}; opacity: 1; }}
+        /* Overview cards. */
+        .launcher-grid {{ background: transparent; padding: 2px; }}
+        .launcher-grid flowboxchild.launcher-tile {{
+            background: alpha({colors['foreground']}, 0.045);
+            border: 1px solid alpha({colors['foreground']}, 0.10);
+            border-radius: {radius}px; padding: 10px 10px 8px 12px; min-height: 128px;
+        }}
+        .launcher-grid flowboxchild.launcher-tile:hover {{ border-color: alpha({colors['accent']}, 0.55); }}
+        .launcher-grid flowboxchild.launcher-tile:selected {{
+            background: alpha({colors['accent']}, 0.16); border-color: {colors['accent']};
+        }}
+        .launcher-grid flowboxchild:focus-visible {{ outline: none; }}
+        .launcher-tile-name {{ font-size: 13px; font-weight: 600; margin-top: 4px; }}
+        .launcher-card button.launcher-tile-menu {{ padding: 2px; min-width: 0; min-height: 0; opacity: 0.55; }}
+        .launcher-tile:selected button.launcher-tile-menu, .launcher-tile:hover button.launcher-tile-menu {{ opacity: 1; }}
+        .launcher-tile .launcher-run-dot {{ min-width: 10px; min-height: 10px; }}
+        /* Filter bar under the overview. */
+        .launcher-filter-bar {{ padding-top: 8px; border-top: 1px solid alpha({colors['foreground']}, 0.12); }}
+        .launcher-card button.launcher-filter-mode {{ padding: 3px 12px; min-height: 0; border-radius: 0; font-size: 12px; }}
+        .launcher-card button.launcher-filter-mode.launcher-toggle-active {{ background: alpha({colors['accent']}, 0.35); font-weight: 600; }}
+        .launcher-card button.launcher-filter-chip {{
+            padding: 3px 10px; min-height: 0; font-size: 12px; border-radius: 999px;
+            border: 1px solid alpha({colors['foreground']}, 0.18);
+        }}
+        .launcher-card button.launcher-filter-chip:hover {{ border-color: alpha({colors['accent']}, 0.7); }}
+        .launcher-card button.launcher-filter-chip.launcher-filter-on {{
+            background: {colors['accent']}; border-color: {colors['accent']};
+        }}
+        .launcher-card button.launcher-filter-chip.launcher-filter-on label {{ color: {colors['background']}; font-weight: 600; }}
+        .launcher-header-hint {{ font-size: 10px; color: {dim_hex}; }}
+        .launcher-filter-dragging button.launcher-filter-group {{ border-style: dashed; border-color: {colors['accent']}; }}
+        .launcher-card button.launcher-filter-chip.launcher-filter-drop {{ background: alpha({colors['accent']}, 0.45); }}
+        .launcher-filter-count {{ font-size: 10px; opacity: 0.7; }}
+        .launcher-filter-dot {{ min-width: 7px; min-height: 7px; border-radius: 999px; background: {colors['green']}; }}
+        .launcher-card button.launcher-filter-chip.launcher-filter-new {{ border-style: dashed; color: {dim_hex}; }}
         /* The running toggle's dot: green while any app runs, grey otherwise. */
         button.launcher-running-btn image {{ color: {dim_hex}; }}
         button.launcher-running-btn.any-running image {{ color: {colors['green']}; }}
@@ -838,6 +1627,9 @@ class Launcher(Gtk.Application):
         if self.mode == "plugins":
             self.load_plugins()
         self.search_query = ""
+        self.resize_to(*self.saved_card_size())  # Within the monitor it opens on.
+        self.move_to(self.position)
+        GLib.idle_add(self.keep_on_screen)
         self.update_hidden_button_state()
         try:
             self.refresh_running()
@@ -853,6 +1645,10 @@ class Launcher(Gtk.Application):
             GLib.idle_add(self.open_settings_page)
             return
         def _focus():
+            if self.overview:
+                first = self.selected_item() or self.grid.get_child_at_index(0)
+                (first or self.grid).grab_focus()
+                return GLib.SOURCE_REMOVE
             first = self.rows.get_first_child()
             if first:
                 first.grab_focus()
@@ -942,7 +1738,7 @@ class Launcher(Gtk.Application):
         if self.actions_menu_open():
             self.apps_changed_source = GLib.timeout_add(700, self.reload_apps)
             return GLib.SOURCE_REMOVE
-        row = self.rows.get_selected_row()
+        row = self.selected_item()
         selected = self.row_key(row) if row is not None else None
         try:
             self.apps = parse_desktop_files()
@@ -1011,8 +1807,10 @@ class Launcher(Gtk.Application):
                         ", ".join(f"{b['description']} ({shortcuts.combo_label(b['combo'])})" for b in removed))
 
     def on_overlay_click(self, _gesture, _count, x, y):
+        if self.resize_start is not None or time.monotonic() < getattr(self, "resized_at", 0) + 0.3:
+            return  # The end of a resize, not a click beside the card.
         picked = self.overlay.pick(x, y, Gtk.PickFlags.DEFAULT)
-        if picked is None or not picked.is_ancestor(self.card):
+        if picked is None or not (picked == self.card_frame or picked.is_ancestor(self.card_frame)):
             self.hide()
 
     def on_active_changed(self, window, _property):
@@ -1022,6 +1820,8 @@ class Launcher(Gtk.Application):
     def hide_if_inactive(self):
         if self.actions_menu_open():
             return GLib.SOURCE_REMOVE
+        if getattr(self, "tile_dragging", False):
+            return GLib.SOURCE_REMOVE  # A card is being dragged onto a group.
         # The password dialog for "Open as administrator" has the focus.
         if getattr(self, "admin_auth_pending", False):
             return GLib.SOURCE_REMOVE
@@ -1070,7 +1870,25 @@ class Launcher(Gtk.Application):
                 self.hide()
             return True
 
-        if key in (Gdk.KEY_g, Gdk.KEY_G) and state & Gdk.ModifierType.CONTROL_MASK and self.shortcut_app is None:
+        ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
+        if self.overview and self.shortcut_app is None:
+            if key in (Gdk.KEY_g, Gdk.KEY_G) and ctrl:
+                self.next_overview_filter(-1 if state & Gdk.ModifierType.SHIFT_MASK else 1)
+                return True
+            if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+                tile = self.selected_item()
+                if tile is not None:
+                    self.launch(tile.app, tile.actions_button)
+                return True
+            if key == Gdk.KEY_Menu:
+                tile = self.selected_item()
+                if tile is not None:
+                    self.show_actions(tile.actions_button, tile.app)
+                return True
+            if not ctrl and self.overview_key(key, state):
+                return True
+
+        if key in (Gdk.KEY_g, Gdk.KEY_G) and ctrl and self.shortcut_app is None:
             self.toggle_view()
             return True
 
@@ -1145,13 +1963,13 @@ class Launcher(Gtk.Application):
             return True
 
         if key in (Gdk.KEY_k, Gdk.KEY_K) and state & Gdk.ModifierType.CONTROL_MASK:
-            row = self.rows.get_selected_row()
+            row = self.selected_item()
             if row is not None and hasattr(row, "app"):
                 self.open_shortcut_page(row.app)
             return True
 
         if key == Gdk.KEY_Delete:
-            row = self.rows.get_selected_row()
+            row = self.selected_item()
             if row is not None and hasattr(row, "app"):
                 self.close_app(row.app)
             return True
@@ -1178,7 +1996,8 @@ class Launcher(Gtk.Application):
     def poll(self):
         if self.window and self.window.is_visible():
             # Replacing a row also destroys its anchored actions menu.
-            menu_open = self.actions_menu_open()
+            # Rebuilding the cards mid-drag would drop the dragged card.
+            menu_open = self.actions_menu_open() or getattr(self, "tile_dragging", False)
             # Tray icons come and go with their apps (Steam started, NordVPN quit).
             if self.mode == "plugins" and not menu_open and self.shortcut_app is None and self.tray_changed():
                 self.reload_apps()
@@ -1259,12 +2078,10 @@ class Launcher(Gtk.Application):
             self.running_button.add_css_class("any-running")
         else:
             self.running_button.remove_css_class("any-running")
-        selected = self.rows.get_selected_row()
+        selected = self.selected_item()
         if selected_id is None:
             selected_id = self.row_key(selected) if selected else None
         selected_row = None
-        while child := self.rows.get_first_child():
-            self.rows.remove(child)
         query = self.search_query.casefold().strip()
         if self.list_bindings is None:
             self.list_bindings = shortcuts.Bindings(self.shortcut_state)
@@ -1276,6 +2093,13 @@ class Launcher(Gtk.Application):
             if (is_hidden or self.off_bar(app)) and not self.show_hidden:
                 return False
             return query in app["name"].casefold()
+
+        if self.overview:
+            entries = self.plugins if self.mode == "plugins" else self.apps
+            self.refresh_overview([a for a in entries if shown(a)], selected_id)
+            return
+        while child := self.rows.get_first_child():
+            self.rows.remove(child)
 
         def add(row):
             nonlocal selected_row
@@ -2198,7 +3022,7 @@ class Launcher(Gtk.Application):
         # Taken out of the bar, the row leaves the list: keep the place there.
         selected_id = plugin["desktop_id"]
         if not placed and not self.show_hidden:
-            row = self.rows.get_first_child()
+            row = self.item_view().get_first_child()
             while row is not None:
                 if getattr(row, "app", None) is plugin:
                     neighbour = row.get_next_sibling() or row.get_prev_sibling()
@@ -2435,6 +3259,7 @@ class Launcher(Gtk.Application):
         page.set_margin_start(4)
         page.set_margin_end(4)
         page.set_size_request(-1, LIST_HEIGHT)
+        self.height_pages.append(page)
         rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         rule.add_css_class("launcher-settings-rule")
         page.append(rule)
@@ -2559,7 +3384,7 @@ class Launcher(Gtk.Application):
         self.back_button.remove_css_class("launcher-back-bordered")
         self.title.remove_css_class("launcher-section-title")
         self.show_main_header()
-        self.stack.set_visible_child_name("list")
+        self.stack.set_visible_child_name(self.main_page())
         self.update_title()
         self.refresh_list()
 
@@ -2574,14 +3399,22 @@ class Launcher(Gtk.Application):
     def hide_main_header(self):
         self.back_button.set_visible(True)
         for button in (self.hidden_button, self.mode_button, self.running_button, self.view_button,
-                       self.settings_button):
+                       self.settings_button, self.filter_bar, self.mouse_hint):
             button.set_visible(False)
+        # No hint on sub-pages: the title takes the whole header.
+        self.title.set_hexpand(True)
 
     def show_main_header(self):
-        """The list's header buttons."""
+        """The list's header buttons. The overview filters by group in its
+        bottom bar instead of the list | groups | origin switch."""
         self.back_button.set_visible(False)
-        for button in (self.hidden_button, self.view_button, self.mode_button, self.settings_button):
+        for button in (self.hidden_button, self.mode_button, self.settings_button):
             button.set_visible(True)
+        self.view_button.set_visible(not self.overview)
+        self.filter_bar.set_visible(self.overview)
+        self.mouse_hint.set_visible(True)
+        self.title.set_hexpand(False)  # The hint takes the free room.
+        self.update_mouse_hint()
         self.running_button.set_visible(self.mode == "apps")
 
     def toggle_view(self, view=None):
@@ -2633,7 +3466,7 @@ class Launcher(Gtk.Application):
         self.back_button.remove_css_class("launcher-back-bordered")
         self.title.remove_css_class("launcher-section-title")
         self.show_main_header()
-        self.stack.set_visible_child_name("list")
+        self.stack.set_visible_child_name(self.main_page())
         self.update_title()
         if refresh:
             self.refresh_list()
@@ -2643,6 +3476,7 @@ class Launcher(Gtk.Application):
         page.set_margin_start(4)
         page.set_margin_end(4)
         page.set_size_request(-1, LIST_HEIGHT)
+        self.height_pages.append(page)
         rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
         rule.add_css_class("launcher-settings-rule")
         page.append(rule)
@@ -2731,8 +3565,11 @@ class Launcher(Gtk.Application):
             return
         self.save_groups()
         self.group_name_target = None
-        # Show where it went: the group view, on the group or the moved entry.
-        if self.view != "groups":
+        # Show where it went: the overview filtered to the group, or the
+        # group view, on the group or the moved entry.
+        if getattr(self, "overview", False):
+            self.overview_filter[self.mode] = gid
+        elif self.view != "groups":
             self.view = "groups"
             try:
                 set_view(self.view)
@@ -2748,6 +3585,7 @@ class Launcher(Gtk.Application):
         page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
         page.set_min_content_height(LIST_HEIGHT)
         page.set_max_content_height(LIST_HEIGHT)
+        self.height_pages.append(page)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_margin_start(4)
         box.set_margin_end(4)
@@ -2922,7 +3760,7 @@ class Launcher(Gtk.Application):
             return
         if not app.get("self_launcher") and not app.get("openable", True):
             return
-        self.sc_page.set_size_request(-1, LIST_HEIGHT)
+        self.sc_page.set_size_request(-1, self.page_height())
         self.shortcut_app = app
         self.sc_app_id = shortcuts.app_key(app)
         self.shortcut_state = shortcuts.load_state()
@@ -2955,7 +3793,7 @@ class Launcher(Gtk.Application):
         self.shortcut_app = None
         self.sc_editing = None
         self.show_main_header()
-        self.stack.set_visible_child_name("list")
+        self.stack.set_visible_child_name(self.main_page())
         self.update_title()
         if focus_list:
             self.refresh_list(selected_id=app["desktop_id"] if app else None)
@@ -3557,7 +4395,7 @@ class Launcher(Gtk.Application):
         hidden_ids = self.hidden_by_mode[mode]
         selected_id = app["desktop_id"]
         if hidden:
-            row = self.rows.get_first_child()
+            row = self.item_view().get_first_child()
             while row:
                 if hasattr(row, "app") and row.app["desktop_id"] == selected_id:
                     target = row.get_next_sibling() or row.get_prev_sibling()
@@ -3611,7 +4449,7 @@ class Launcher(Gtk.Application):
                 button.add_css_class("launcher-toggle-active")
             else:
                 button.remove_css_class("launcher-toggle-active")
-        if self.stack.get_visible_child_name() == "list":
+        if self.main_page_open():
             self.show_main_header()
         if self.running_first:
             self.running_button.set_tooltip_text(_("Sort apps by name"))
@@ -3715,8 +4553,8 @@ class Launcher(Gtk.Application):
             # Already on the plugin page: show the fresh list, unless a menu
             # or a sub-page is open (rebuilding rows would close it).
             if (self.mode == "plugins" and self.window.get_visible() and not self.actions_menu_open()
-                    and self.stack.get_visible_child_name() == "list"):
-                row = self.rows.get_selected_row()
+                    and self.main_page_open()):
+                row = self.selected_item()
                 self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
             return GLib.SOURCE_REMOVE
         threading.Thread(target=work, daemon=True).start()

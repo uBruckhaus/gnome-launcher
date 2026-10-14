@@ -4,6 +4,8 @@
 
 ![App Manager](preview.png)
 
+**New in 1.9:** **cards and a group bar.** Pull the popup wide (corner grip) or double-click its header, and the list becomes **cards in columns** (up to six) with a **group bar** at the bottom: Apps | Plugins, **+ New group**, then All, Running and your groups. Click a group to show only it, **drag a card onto a group** to move it there (or onto + New group to start one), right-click a group for rename, move and delete. The popup **resizes**, **moves** (drag the header) and remembers both; **double-click the header** to maximize or go back to the default size.
+
 **New in 1.8:** Launch & Bind is now called **App Manager**, because it does much more than launch and bind: **your groups** (Office, Media, … or your own, apps and plugins each with theirs), **by origin** (your default apps, what came with Omarchy, what you added), **App info** (path, package, size, install date, website, copy and open buttons), **running apps first**, and a much faster list. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
 
 **New in 1.7:** the launcher speaks eight languages (English, German, French, Spanish, Italian, Portuguese, Dutch, Polish) and follows your system language; a settings page (gear ⚙, top right) to pick another one; and an optional **Open as administrator** action, off until you switch it on there.
@@ -25,6 +27,14 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **One-click rebinding**: taking over a key is an option, not an error. **Rebind** turns the old binding off while your shortcut exists; remove the shortcut and the original works again.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
+## Changes in 1.9.0
+
+**Resizable and movable.** Drag the grip in the bottom-right corner to resize; drag the header (hand cursor) to move the popup. Size and place are kept in `~/.config/applauncher/settings.json` (`size`, `position`); the card always stays on screen.
+
+**Double-click the header.** At the default size either button maximizes, maximized either button goes back to the default size; in between, a left double-click restores the default size and a right double-click maximizes. Both come back centred. A small hint in the header says what a double-click does right now. Double-clicking the grip also restores the default size.
+
+**Cards and a group bar.** As soon as the popup is wide enough for two cards, the list turns into cards (icon with the running dot, name, description, shortcut, `☰` menu, right-click for the same menu), up to six columns. The bar at the bottom has an **Apps | Plugins** switch, **+ New group** (click to name one, drop a card on it to start one with that card), and one chip per group with its count: **All**, **Running** and your groups. Click a chip to show only that group; `Ctrl+G` / `Ctrl+Shift+G` step through them; right-click a group chip to rename, move or delete it. Drag a card onto a group chip to move it there. When there are more groups than fit, the bar scrolls (wheel, ‹ › buttons). Arrow keys, `Home`/`End` and `Page Up`/`Page Down` move between cards, `Enter` opens, the `Menu` key opens the `☰` menu. Narrow again, it is the familiar list.
 
 ## Changes in 1.8.0
 
@@ -201,9 +211,13 @@ Shortcuts are stored in `~/.config/applauncher/shortcuts.json` and written to `~
 | `Delete` | Close active instance of the selected app |
 | `Ctrl+K` | Manage the global shortcut of the selected app |
 | `Tab` | Switch between the app page and the widget & plugin page |
-| `Ctrl+G` | Step through list, group and origin view |
+| `Ctrl+G` | Step through list, group and origin view; with cards: the next group (`Ctrl+Shift+G`: the previous one) |
+| `Arrows`, `Home` / `End`, `Page Up` / `Page Down` with cards | Move between cards |
+| `Menu` with cards | Open the card's `☰` menu |
 | `Left` / `Right` on a group heading | Fold / unfold the group (`Right` on an open one opens its menu) |
 | `Click outside` | Dismiss launcher popup |
+| Drag the header / the corner grip | Move / resize the popup |
+| Double-click the header | Maximize or go back to the default size (see Changes in 1.9.0) |
 
 ## Removal
 

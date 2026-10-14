@@ -206,6 +206,34 @@ def saved_view(path=None):
 
 def set_view(view, path=None):
     _save_setting("view", view if view in ("groups", "origin") else "list", path)
+
+
+def saved_size(key, path=None):
+    """(width, height) the popup was resized to ("size"); None for the default.
+    Two or more card columns wide, it shows the overview."""
+    value = _load_settings(path).get(key)
+    if (isinstance(value, list) and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and 100 <= v <= 20000 for v in value)):
+        return value[0], value[1]
+    return None
+
+
+def set_saved_size(key, size, path=None):
+    _save_setting(key, [int(size[0]), int(size[1])] if size else None, path)
+
+
+def saved_position(path=None):
+    """(x, y) of the card's top-left corner after it was moved by its
+    header; None: centred."""
+    value = _load_settings(path).get("position")
+    if (isinstance(value, list) and len(value) == 2
+            and all(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 20000 for v in value)):
+        return value[0], value[1]
+    return None
+
+
+def set_saved_position(position, path=None):
+    _save_setting("position", [int(position[0]), int(position[1])] if position else None, path)
 HIDDEN_PLUGINS_FILE = Path.home() / ".config/applauncher/hidden-plugins.json"
 
 
