@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch & Bind - tray icons (StatusNotifierItem) and their menus.
+"""App Manager - tray icons (StatusNotifierItem) and their menus.
 
 Used by the launcher's widget list, and as a command for shortcuts:
 

@@ -18,7 +18,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "\uf00a"
-    tooltipText: "Launch & Bind"
+    tooltipText: "App Manager"
 
     onPressed: function(mouseButton) {
       if (!root.bar) return

@@ -1,12 +1,14 @@
-# Launch & Bind
+# App Manager
 
-Fast, theme-aware application launcher popup and bar widget for [Omarchy](https://omarchy.org) — with an advanced shortcut editor: bind keys to apps **or their actions**, see who owns every key, and rebind any of them in one click.
+**Launch · Group · Bind · Inspect.** All your apps and plugins in one theme-aware popup and bar widget for [Omarchy](https://omarchy.org): type to launch, sort them into your own groups or by origin, give any of them a global key on a key map that shows who owns every key, and look up where each one lives, how big it is and when it was installed.
 
-![Launch & Bind](preview.png)
+![App Manager](preview.png)
+
+**New in 1.8:** Launch & Bind is now called **App Manager**, because it does much more than launch and bind: **your groups** (Office, Media, … or your own, apps and plugins each with theirs), **by origin** (your default apps, what came with Omarchy, what you added), **App info** (path, package, size, install date, website, copy and open buttons), **running apps first**, and a much faster list. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
 
 **New in 1.7:** the launcher speaks eight languages (English, German, French, Spanish, Italian, Portuguese, Dutch, Polish) and follows your system language; a settings page (gear ⚙, top right) to pick another one; and an optional **Open as administrator** action, off until you switch it on there.
 
-**New in 1.6.2:** Simple Launcher is now called **Launch & Bind**, because it does much more than launch apps. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
+**New in 1.6.2:** Simple Launcher was renamed **Launch & Bind** (now App Manager). Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
 
 **New in 1.6:** shortcuts of uninstalled apps are cleaned up right away, and hand-written ones in your Hyprland files are deleted only after you say yes; menus open on their first entry, mouse and keyboard share one highlight, and Left or Backspace closes a menu again; **Uninstall…** explains how to remove browser web apps (Chrome, Brave, …) and tells you when it fails; the list keeps its height and its search when switching lists.
 
@@ -23,6 +25,21 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **One-click rebinding**: taking over a key is an option, not an error. **Rebind** turns the old binding off while your shortcut exists; remove the shortcut and the original works again.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
+## Changes in 1.8.0
+
+**New name.** Launch & Bind is now **App Manager**; the plugin ID `ubruckhaus.simple-launcher-for-fools`, its folder, settings and shortcuts are unchanged.
+
+**Faster.** The list builds once and is cached: switching between apps and plugins is instant, and the plugin page is read in the background when the popup opens.
+
+
+**Groups.** The list/folder switch in the header (`Ctrl+G`) shows each page as a plain list or in **collapsible groups**. Apps and plugins keep their own pages (`Tab`) and their own groups: apps start in Office, Internet, Media, Graphics, Development, Games, System or Utilities by their desktop categories; plugins in System, Network, Media, Home or Tools by their bar category; the rest in Other. Tray icons stay on top of the plugin page as **Running in the bar**. **Group ›** in an entry's `☰` menu moves it to another group or a **New group…**. A group heading folds with a click, `Enter` or `←`/`→`. A heading's own `☰` has **Rename…**, **Move up/down**, **Delete group** (asks first; its entries go back to their suggested group) and **New group…**. Groups are kept in `~/.config/applauncher/groups.json`.
+
+**By origin.** The third part of the switch (the box) sorts each page into **Your default apps** (your browser, terminal, mail, file manager, text editor, … from `mimeapps.list` and the terminal list), **Comes with Omarchy** (packages Omarchy installs and its own web apps and launchers, from Omarchy's package lists and pacman's database) and **Other**; on the plugin page **Built into Omarchy** and **Other**. `Ctrl+G` steps through list, groups and origin.
+
+**Details.** **Details…** in an app's or plugin's `☰` menu shows what it is and where it lives: type, whether it came with Omarchy (installed with Omarchy, one of Omarchy's own web apps and launchers, or built into Omarchy) and what it is your default app for (web browser, terminal, email, files, text editor, …), group, ID, desktop file, command and program; for packages the pacman package, version, installed size, install date and website; for AppImages the file size and date; for plugins the version, author, licence, folder, size on disk and, for git checkouts, the source, commit and install date. Paths and addresses have a copy button.
+
+**Running apps first.** The dot button at the front of the header puts running apps in a **Running** group on top; it is green while any app runs and grey otherwise.
 
 ## Changes in 1.5.0
 
@@ -48,7 +65,7 @@ New plugins show up in the open list on their own, like newly installed apps: th
 
 **Two-step shortcuts**: tick **Two steps** on the shortcut page, choose the first combo (e.g. `Super + Alt + Space`), then the second key on its own (e.g. `N`) — press it or click a letter; a second click clears it, like every key button. Several shortcuts can share a first combo, each with its own second key; the letters show which second keys are free. The first combo enters a Hyprland submap where the second key runs the shortcut and any other key cancels. A first combo cannot open anything by itself, so it conflicts with one-step shortcuts on the same keys (shown and rebindable like any other conflict).
 
-**Launch & Bind** itself is in the widget list too: Enter or **Shortcut…** opens its shortcut page, so the keys that open the launcher are set the same way as any app's.
+**App Manager** itself is in the widget list too: Enter or **Shortcut…** opens its shortcut page, so the keys that open the launcher are set the same way as any app's.
 
 Its `☰` menu has **Show apps** and **Show widgets & plugins**, and on the shortcut page **Opens** offers the same choice, so each list can get its own key (e.g. `Super + Alt + A` for apps, `Super + Alt + W` for widgets). Such a key opens the launcher on that list, switches an open launcher over to it, and closes it when that list is already showing. By hand: `launcher-toggle apps` or `launcher-toggle plugins`.
 
@@ -134,12 +151,12 @@ Or install locally:
 
 ## Keybindings (Optional)
 
-The easiest way: switch to **Widgets & Plugins** (`Tab`), select **Launch & Bind** and press Enter (or `☰` → **Shortcut…**). Assign one or more keys there; a binding you already wrote by hand shows up too and can be changed or turned off like any other.
+The easiest way: switch to **Widgets & Plugins** (`Tab`), select **App Manager** and press Enter (or `☰` → **Shortcut…**). Assign one or more keys there; a binding you already wrote by hand shows up too and can be changed or turned off like any other.
 
 To bind it by hand instead (such as `SUPER + SPACE`), add the following to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER, SPACE", "Launch & Bind", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
+o.bind("SUPER, SPACE", "App Manager", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
 
 `launcher-toggle apps` and `launcher-toggle plugins` open a specific list.
@@ -147,7 +164,7 @@ o.bind("SUPER, SPACE", "Launch & Bind", "~/.config/omarchy/plugins/ubruckhaus.si
 Or for `SUPER + CTRL + ALT + SPACE`:
 
 ```lua
-o.bind("SUPER + CTRL + ALT + SPACE", "Launch & Bind", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
+o.bind("SUPER + CTRL + ALT + SPACE", "App Manager", "~/.config/omarchy/plugins/ubruckhaus.simple-launcher-for-fools/launcher-toggle")
 ```
 
 ## App Shortcuts
@@ -179,7 +196,9 @@ Shortcuts are stored in `~/.config/applauncher/shortcuts.json` and written to `~
 | `Right Arrow` | Open context actions menu (for apps with desktop actions) |
 | `Delete` | Close active instance of the selected app |
 | `Ctrl+K` | Manage the global shortcut of the selected app |
-| `Tab` | Switch between the app list and the widget & plugin list |
+| `Tab` | Switch between the app page and the widget & plugin page |
+| `Ctrl+G` | Step through list, group and origin view |
+| `Left` / `Right` on a group heading | Fold / unfold the group (`Right` on an open one opens its menu) |
 | `Click outside` | Dismiss launcher popup |
 
 ## Removal

@@ -65,6 +65,25 @@ def admin_action_enabled(path=None):
 
 def set_admin_action(enabled, path=None):
     _save_setting("admin_action", bool(enabled), path)
+
+
+def running_first_enabled(path=None):
+    """Header toggle on the app list: running apps in their own group on top."""
+    return _load_settings(path).get("running_first") is True
+
+
+def set_running_first(enabled, path=None):
+    _save_setting("running_first", bool(enabled), path)
+
+
+def saved_view(path=None):
+    """The list as a plain list, or in groups (header toggle, Ctrl+G)."""
+    view = _load_settings(path).get("view")
+    return view if view in ("groups", "origin") else "list"
+
+
+def set_view(view, path=None):
+    _save_setting("view", view if view in ("groups", "origin") else "list", path)
 HIDDEN_PLUGINS_FILE = Path.home() / ".config/applauncher/hidden-plugins.json"
 
 
@@ -217,6 +236,7 @@ def parse_desktop_files():
                          "terminal": values.get("Terminal", "").strip().lower() in ("true", "1"),
                          "sandboxed": bool(values.get("X-Flatpak") or values.get("X-SnapInstanceName")),
                          "pwa": is_pwa(values),
+                         "categories": [c for c in values.get("Categories", "").split(";") if c][:20],
                          "desktop_id": path.stem, "startup_class": values.get("StartupWMClass", "")})
 
     apps.extend(scan_standalone_appimages(seen_names))
@@ -586,7 +606,7 @@ def plugin_can_open(directory, manifest):
 def self_entry(in_bar=None):
     """The launcher itself, listed so its own shortcut can be set."""
     return {
-        "name": "Launch & Bind",
+        "name": "App Manager",
         "plugin_id": SELF_PLUGIN_ID,
         "self_launcher": True,
         "exec": str(Path(__file__).resolve().parent / "launcher-toggle"),
@@ -655,6 +675,10 @@ def parse_plugins():
             "bar_widget": bar_widget,
             "bar_section": (manifest.get("barWidget") or {}).get("defaultSection")
                            if isinstance(manifest.get("barWidget"), dict) else None,
+            "plugin_dir": str(directory),
+            # Suggests the plugin's group (System, Network, …) in the group view.
+            "category": str((manifest.get("barWidget") or {}).get("category") or manifest.get("category") or "")[:40]
+                        if isinstance(manifest.get("barWidget") or {}, dict) else "",
             "in_bar": bar_widget and enabled,
             "openable": openable,
         })
@@ -769,9 +793,20 @@ def app_window_classes(app):
 
 def terminal_command(app):
     """For a terminal launcher like `foot -e /path/claude`, the command's
-    name ("claude"); None for anything else."""
+    name ("claude"); None for anything else. Remembered in the entry: the
+    run-state checks ask for it thousands of times per list."""
+    command = app.get("exec", "")
+    cached = app.get("_terminal_command")
+    if cached is not None and cached[0] == command:
+        return cached[1]
+    result = _terminal_command(command)
+    app["_terminal_command"] = (command, result)
+    return result
+
+
+def _terminal_command(command):
     try:
-        args = shlex.split(app.get("exec", ""))
+        args = shlex.split(command)
     except ValueError:
         return None
     if not args or Path(args[0]).name.casefold() not in TERMINALS:
@@ -1311,3 +1346,31 @@ def launch_as_admin(app):
                                 stderr=subprocess.DEVNULL, start_new_session=True, env=_clean_env())
     except OSError:
         return None
+
+
+# --- bounded paste --------------------------------------------------------------
+
+MAX_PASTE_TEXT_BYTES = 4096
+_TEXT_MIMES = ("text/plain;charset=utf-8", "text/plain", "UTF8_STRING", "STRING", "TEXT")
+
+
+def clipboard_text(max_chars=200, max_bytes=MAX_PASTE_TEXT_BYTES, timeout=2.0):
+    """Plain text from the Wayland clipboard for a text field, read with
+    wl-paste under a byte cap and a deadline (GTK's own paste buffers the
+    whole offer with neither). Control characters and line breaks become
+    single spaces. "" if there is no text (an empty clipboard makes
+    wl-paste fail); None if the text was too long, too slow or failed."""
+    if not shutil.which("wl-paste"):
+        return ""
+    types = read_bounded_output(["wl-paste", "--list-types"], max_bytes=65536, timeout=timeout)
+    offered = {line.strip() for line in (types or "").splitlines()}
+    for mime in _TEXT_MIMES:
+        if mime not in offered:
+            continue
+        data = read_bounded_output(["wl-paste", "--no-newline", "--type", mime],
+                                   max_bytes=max_bytes, timeout=timeout)
+        if data is None:
+            return None
+        text = "".join(" " if ord(ch) < 32 or 127 <= ord(ch) < 160 else ch for ch in data)
+        return " ".join(text.split())[:max_chars]
+    return ""

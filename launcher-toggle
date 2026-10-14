@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch & Bind - Toggle script
+# App Manager - Toggle script
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"

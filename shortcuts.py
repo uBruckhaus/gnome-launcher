@@ -1,4 +1,4 @@
-"""Launch & Bind - global app shortcuts managed through Hyprland.
+"""App Manager - global app shortcuts managed through Hyprland.
 
 Shortcuts are stored in ~/.config/applauncher/shortcuts.json and rendered to
 ~/.config/hypr/simple-launcher-shortcuts.lua, which hyprland.lua requires last
@@ -746,6 +746,20 @@ class Bindings:
                 break
         return found
 
+    def active_default_binds(self):
+        """Omarchy defaults Hyprland actually has: not overridden by the user,
+        not gated off (e.g. preinstalled bindings disabled). The same for
+        every app, so worked out once per snapshot."""
+        cached = getattr(self, "_active_defaults", None)
+        if cached is None:
+            user_ids = {combo_id(b["combo"]) for b in self.user_binds} | self.user_unbinds
+            live = {(b["mask"], b["key"], b["description"]) for b in self.live}
+            cached = self._active_defaults = [
+                bind for bind in self.default_binds
+                if (cid := combo_id(bind["combo"])) not in user_ids
+                and (cid[0], cid[1], bind["description"]) in live]
+        return cached
+
     def external_shortcuts(self, app):
         """Hand-written user binds and live Omarchy defaults that appear to
         launch this app."""
@@ -837,15 +851,7 @@ class Bindings:
             action = launches_app(bind)
             if action is not None:
                 result.append({**bind, "action": action})
-        user_ids = {combo_id(b["combo"]) for b in self.user_binds} | self.user_unbinds
-        for bind in self.default_binds:
-            cid = combo_id(bind["combo"])
-            # Only defaults Hyprland actually has: not overridden by the user,
-            # not gated off (e.g. preinstalled bindings disabled).
-            if cid in user_ids or not any(
-                    (b["mask"], b["key"]) == cid[:2] and b["description"] == bind["description"]
-                    for b in self.live):
-                continue
+        for bind in self.active_default_binds():
             action = launches_app(bind)
             if action is not None:
                 result.append({**bind, "file": "Omarchy", "action": action})
@@ -893,7 +899,7 @@ def submap_name(first):
 
 
 def render_lua(state):
-    lines = ["-- Managed by Launch & Bind (ubruckhaus.simple-launcher-for-fools).",
+    lines = ["-- Managed by App Manager (ubruckhaus.simple-launcher-for-fools).",
              "-- Edit shortcuts from the launcher; manual changes here are overwritten.", ""]
     sequences = {}  # first step id -> (first step, [(entry, combo, command)])
     apps = [state["apps"][k] for k in sorted(state["apps"], key=lambda k: state["apps"][k]["name"].casefold())]
@@ -950,7 +956,7 @@ def render_lua(state):
         lines.append("end)")
         summary = ", ".join(f"{key_label(c['then'])} {e['name']}" for e, c, _l in items)
         lines.append(f"hl.bind({lua_string(combo_string(first))}, hl.dsp.submap({lua_string(name)}), "
-                     f"{{ description = {lua_string(('Launch & Bind, then: ' + summary)[:160])} }})")
+                     f"{{ description = {lua_string(('App Manager, then: ' + summary)[:160])} }})")
         lines.append("")
     return "\n".join(lines)
 
@@ -968,7 +974,7 @@ def ensure_required():
         shutil.copy2(HYPR_MAIN, backup)
     suffix = "" if text.endswith("\n") else "\n"
     _atomic_write(HYPR_MAIN, text + suffix +
-                  "\n-- Launch & Bind app shortcuts (keep last so they override defaults)\n"
+                  "\n-- App Manager app shortcuts (keep last so they override defaults)\n"
                   + REQUIRE_LINE + "\n")
 
 

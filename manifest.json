@@ -1,25 +1,26 @@
 {
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
-  "name": "Launch & Bind",
-  "version": "1.7.1",
+  "name": "App Manager",
+  "version": "1.8.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
-  "description": "Fast, theme-aware app launcher for Omarchy: type to find any app, give it or its actions (e.g. New Incognito Window) a global shortcut, and open widgets, plugins and tray apps from a second list, where widgets can also be put into or taken out of the bar. See who owns every key, rebind it in one click, or use two-step shortcuts.",
+  "description": "Launch · Group · Bind · Inspect: all your apps and plugins in one theme-aware popup. Type to launch; sort apps into your own groups or by origin (your default apps, what came with Omarchy, what you added); give any app or app action a global shortcut on a key map that shows who owns every key; and open App info with path, package, size, install date and website. Widgets, plugins and tray apps have their own page, where widgets can be put into or taken out of the bar.",
   "homepage": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "repository": "https://github.com/ubruckhaus/omarchy-simple-launcher-for-fools",
   "keywords": [
-    "launcher",
-    "menu",
     "apps",
-    "gtk4",
-    "layer-shell",
+    "launcher",
+    "app manager",
+    "groups",
     "shortcuts",
     "keybindings",
     "rebind",
+    "app info",
     "omarchy",
     "widgets",
-    "tray"
+    "tray",
+    "gtk4"
   ],
   "kinds": [
     "bar-widget"
@@ -29,8 +30,8 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Launch & Bind",
-    "description": "Toggle Launch & Bind",
+    "displayName": "App Manager",
+    "description": "Toggle App Manager",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left"

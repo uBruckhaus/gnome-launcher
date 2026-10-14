@@ -43,15 +43,19 @@ from launcher_core import (
     TERMINALS, app_process_name, browser_web_app, background_process_names, child_process_names, client_matches_app,
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
-    admin_action_enabled, admin_command, set_admin_action, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
+    admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
+    plugin_manifests, set_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
     icon_bytes,
 )
 from palette import ThemePalette
 import i18n
-from i18n import _, ngettext
+from i18n import _, N_, ngettext
+import details
+import groups
 import pidfile
 import shortcuts
+import threading
 import tray
 
 # Height of the app list and the shortcut page, whatever they hold.
@@ -245,6 +249,13 @@ class Launcher(Gtk.Application):
         self.hidden_by_mode = {"apps": load_hidden_apps(HIDDEN_FILE),
                                "plugins": load_hidden_apps(HIDDEN_PLUGINS_FILE)}
         self.show_hidden_by_mode = {"apps": False, "plugins": False}
+        self.running_first = running_first_enabled()
+        # "list" or "groups" (collapsible groups); apps and plugins (Tab) each
+        # have their own groups.
+        self.view = saved_view()
+        self.groups_all = groups.load()
+        self.group_name_target = None  # (group id or None, app to put in it or None)
+        self.details_token = 0
         self.clients = []
         self.window_children = {}  # pid -> child process names, per refresh.
         self.process_names = set()
@@ -260,12 +271,20 @@ class Launcher(Gtk.Application):
         self.apps_changed_source = 0
 
     @property
-    def hidden_ids(self):
-        return self.hidden_by_mode[self.mode]
+    def groups(self):
+        """The groups of the page shown: apps or plugins."""
+        return self.groups_all[self.mode]
+
+    @property
+    def list_kind(self):
+        return self.mode
+
+    def hidden_ids_for(self, app):
+        return self.hidden_by_mode["plugins" if is_widget(app) else "apps"]
 
     @property
     def show_hidden(self):
-        return self.show_hidden_by_mode[self.mode]
+        return self.show_hidden_by_mode[self.list_kind]
 
     def do_shutdown(self):
         cleanup_pid()
@@ -288,9 +307,13 @@ class Launcher(Gtk.Application):
         self.open()
 
     def build_window(self):
+        settings = Gtk.Settings.get_default()
+        if settings is not None:
+            # No middle-click paste anywhere in the popup (see guard_text_field).
+            settings.set_property("gtk-enable-primary-paste", False)
         window = Gtk.ApplicationWindow(application=self)
         window.set_decorated(False)
-        window.set_title("Launch & Bind")
+        window.set_title("App Manager")
         window.set_name("launcher-window")
         Gtk4LayerShell.init_for_window(window)
         Gtk4LayerShell.set_namespace(window, "simple-launcher-for-fools")
@@ -346,6 +369,30 @@ class Launcher(Gtk.Application):
         title.set_hexpand(True)
         title.set_halign(Gtk.Align.START)
         header.append(title)
+        # App list only: running apps in a group of their own on top. A dot,
+        # like the run dot on the icons (the play icon is the Open action).
+        running_button = Gtk.Button(icon_name="media-record-symbolic")
+        running_button.add_css_class("flat")
+        running_button.add_css_class("launcher-header-btn")
+        running_button.add_css_class("launcher-running-btn")
+        running_button.connect("clicked", self.toggle_running_first)
+        header.append(running_button)
+        self.running_button = running_button
+        # List or groups, as a two-part switch; the shown one is marked.
+        view_box = Gtk.Box()
+        view_box.add_css_class("linked")
+        view_box.add_css_class("launcher-view-switch")
+        self.view_buttons = {}
+        for view, icon in (("list", "view-list-symbolic"), ("groups", "folder-symbolic"),
+                           ("origin", "package-x-generic-symbolic")):
+            button = Gtk.Button(icon_name=icon)
+            button.add_css_class("flat")
+            button.add_css_class("launcher-header-btn")
+            button.connect("clicked", lambda _b, v=view: self.toggle_view(v))
+            view_box.append(button)
+            self.view_buttons[view] = button
+        header.append(view_box)
+        self.view_button = view_box
         mode_button = Gtk.Button()
         mode_button.add_css_class("flat")
         mode_button.add_css_class("launcher-header-btn")
@@ -432,6 +479,8 @@ class Launcher(Gtk.Application):
         self.back_button, self.stack = back_button, stack
         self.build_shortcut_page()
         self.build_settings_page()
+        self.build_group_name_page()
+        self.build_details_page()
         self.apply_theme()
 
     def apply_theme(self):
@@ -628,10 +677,39 @@ class Launcher(Gtk.Application):
         .launcher-list row:selected .launcher-hidden-badge image {{
             color: {sel_fg};
         }}
+        /* Group headings: a tinted band with the name in bold, the count in a chip. */
+        .launcher-list row.launcher-group-row {{ padding: 0; min-height: 0; background: none; }}
+        .launcher-list row.launcher-group-row-next {{ margin-top: 10px; }}
+        .launcher-group-band {{
+            background: alpha({colors['foreground']}, 0.07);
+            border-left: 3px solid {colors['accent']};
+            border-radius: {radius}px;
+            padding: 5px 6px 5px 8px;
+        }}
+        .launcher-list row.launcher-group-row:selected .launcher-group-band {{ background: alpha({colors['accent']}, 0.22); }}
+        .launcher-group-title {{ font-size: 14px; font-weight: 700; }}
+        .launcher-group-count {{
+            font-size: 11px; font-weight: 600; color: {dim_hex};
+            border: 1px solid alpha({colors['foreground']}, 0.25); border-radius: 9px; padding: 0 6px;
+        }}
+        .launcher-group-chevron {{ color: {colors['accent']}; }}
+        .launcher-view-switch {{
+            border: 1px solid alpha({colors['foreground']}, 0.25); border-radius: {radius}px; margin-right: 4px;
+        }}
+        .launcher-view-switch button.launcher-header-btn {{ margin-right: 0; border-radius: 0; }}
+        .launcher-view-switch button.launcher-toggle-active {{ background: alpha({colors['accent']}, 0.35); }}
+        .launcher-card button.launcher-group-menu {{ padding: 2px; min-width: 0; min-height: 0; }}
+        .launcher-group-error {{ color: {colors['red']}; font-size: 12px; }}
+        .launcher-details-name {{ font-size: 15px; font-weight: 600; }}
+        .launcher-details-value {{ font-size: 12px; }}
+        .launcher-card button.launcher-copy-btn {{ padding: 1px; min-width: 0; min-height: 0; }}
         .launcher-toggle-active {{
             background: rgba(147, 147, 195, 0.25);
             border-radius: {radius}px;
         }}
+        /* The running toggle's dot: green while any app runs, grey otherwise. */
+        button.launcher-running-btn image {{ color: {dim_hex}; }}
+        button.launcher-running-btn.any-running image {{ color: {colors['green']}; }}
 
         /* Shortcuts */
         .launcher-shortcut-chip {{
@@ -759,6 +837,8 @@ class Launcher(Gtk.Application):
         except Exception as e:
             print("Error refreshing list:", e, file=sys.stderr)
         self.window.present()
+        if self.mode == "apps":
+            self.prefetch_plugins()
         # Restarted after a language change: back to where the user was.
         if os.environ.pop("SIMPLE_LAUNCHER_PAGE", "") == "settings":
             GLib.idle_add(self.open_settings_page)
@@ -775,6 +855,8 @@ class Launcher(Gtk.Application):
     def hide(self):
         if self.actions_menu_open():
             self.actions_popover.popdown()
+        if self.aux_page_open():
+            self.close_aux_page(refresh=False)
         if self.shortcut_app is not None:
             self.close_shortcut_page(focus_list=False)
         if self.window and self.window.get_visible():
@@ -846,7 +928,7 @@ class Launcher(Gtk.Application):
             self.apps_changed_source = GLib.timeout_add(700, self.reload_apps)
             return GLib.SOURCE_REMOVE
         row = self.rows.get_selected_row()
-        selected = row.app["desktop_id"] if row is not None and hasattr(row, "app") else None
+        selected = self.row_key(row) if row is not None else None
         try:
             self.apps = parse_desktop_files()
             if self.mode == "plugins":
@@ -925,6 +1007,9 @@ class Launcher(Gtk.Application):
     def hide_if_inactive(self):
         if self.actions_menu_open():
             return GLib.SOURCE_REMOVE
+        # Just opened a website from the details page: the browser has the focus.
+        if time.monotonic() < getattr(self, "keep_open_until", 0):
+            return GLib.SOURCE_REMOVE
         if self.window and self.window.get_visible() and not self.window.is_active():
             self.hide()
         return GLib.SOURCE_REMOVE
@@ -939,6 +1024,23 @@ class Launcher(Gtk.Application):
         if self.settings_open() and key in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
             self.close_settings_page()
             return True
+        page = self.stack.get_visible_child_name()
+        # The details page: Esc and Backspace go back; the group name page
+        # needs Backspace for typing, so only Esc.
+        if page == "details":
+            if key in (Gdk.KEY_Escape, Gdk.KEY_BackSpace):
+                self.close_aux_page()
+                return True
+            return False
+        if page == "groupname":
+            if key == Gdk.KEY_Escape:
+                self.close_aux_page()
+                return True
+            # Enter saves from anywhere on the page (the field's own activate too).
+            if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter) and self.group_name_target:
+                self.save_group_name()
+                return True
+            return False
         if key == Gdk.KEY_Escape:
             if self.actions_menu_open():
                 self.actions_popover.popdown()
@@ -948,6 +1050,10 @@ class Launcher(Gtk.Application):
                 self.refresh_list()
             else:
                 self.hide()
+            return True
+
+        if key in (Gdk.KEY_g, Gdk.KEY_G) and state & Gdk.ModifierType.CONTROL_MASK and self.shortcut_app is None:
+            self.toggle_view()
             return True
 
         if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
@@ -1000,8 +1106,20 @@ class Launcher(Gtk.Application):
 
         if key in (Gdk.KEY_Right, Gdk.KEY_Menu):
             row = self.rows.get_selected_row()
+            if row and hasattr(row, "group"):
+                if row.group in self.groups["collapsed"] and key == Gdk.KEY_Right:
+                    self.toggle_group(row.group)
+                elif getattr(row, "actions_button", None) is not None:
+                    self.show_group_actions(row.actions_button, row.group)
+                return True
             if row and hasattr(row, "actions_button"):
                 self.show_actions(row.actions_button, row.app)
+                return True
+
+        if key in (Gdk.KEY_Left, Gdk.KEY_KP_Left):
+            row = self.rows.get_selected_row()
+            if row and hasattr(row, "group") and row.group not in self.groups["collapsed"]:
+                self.toggle_group(row.group)
                 return True
 
         if key == Gdk.KEY_Tab and self.shortcut_app is None:
@@ -1010,13 +1128,13 @@ class Launcher(Gtk.Application):
 
         if key in (Gdk.KEY_k, Gdk.KEY_K) and state & Gdk.ModifierType.CONTROL_MASK:
             row = self.rows.get_selected_row()
-            if row is not None:
+            if row is not None and hasattr(row, "app"):
                 self.open_shortcut_page(row.app)
             return True
 
         if key == Gdk.KEY_Delete:
             row = self.rows.get_selected_row()
-            if row is not None:
+            if row is not None and hasattr(row, "app"):
                 self.close_app(row.app)
             return True
 
@@ -1081,9 +1199,22 @@ class Launcher(Gtk.Application):
         return client_matches_app(client, app)
 
     def terminal_commands(self):
-        return {c for a in self.apps if (c := terminal_command(a))}
+        cached = getattr(self, "_terminal_commands", None)
+        if cached is None or cached[0] is not self.apps:
+            cached = self._terminal_commands = (self.apps, {c for a in self.apps if (c := terminal_command(a))})
+        return cached[1]
 
     def app_state(self, app):
+        """Run state, remembered until the next window/process scan."""
+        key = (id(self.clients), id(self.process_names), id(self.apps))
+        if getattr(self, "_state_key", None) != key:
+            self._state_key, self._states = key, {}
+        ident = (app.get("desktop_id"), "tray_id" in app, "plugin_id" in app)
+        if ident not in self._states:
+            self._states[ident] = self._app_state(app)
+        return self._states[ident]
+
+    def _app_state(self, app):
         if "tray_id" in app:
             return "background"  # Listed only while its app runs.
         if "plugin_id" in app:
@@ -1106,139 +1237,304 @@ class Launcher(Gtk.Application):
 
     def refresh_list(self, selected_id=None):
         self.update_title()
+        if any(self.app_state(app) != "stopped" for app in self.apps):
+            self.running_button.add_css_class("any-running")
+        else:
+            self.running_button.remove_css_class("any-running")
         selected = self.rows.get_selected_row()
         if selected_id is None:
-            selected_id = selected.app.get("desktop_id") if selected else None
+            selected_id = self.row_key(selected) if selected else None
         selected_row = None
         while child := self.rows.get_first_child():
             self.rows.remove(child)
         query = self.search_query.casefold().strip()
         if self.list_bindings is None:
             self.list_bindings = shortcuts.Bindings(self.shortcut_state)
-        for app in self.plugins if self.mode == "plugins" else self.apps:
-            is_hidden = app["desktop_id"] in self.hidden_ids
+
+        def shown(app):
+            is_hidden = app["desktop_id"] in self.hidden_ids_for(app)
             # Bar widgets taken out of the bar are hidden too: the eye shows them
             # to put them back. The launcher itself stays, for its own keys.
             if (is_hidden or self.off_bar(app)) and not self.show_hidden:
-                continue
-            if query not in app["name"].casefold():
-                continue
-            row = Gtk.ListBoxRow()
-            row.app = app
-            if is_hidden:
-                row.add_css_class("launcher-row-hidden")
-            line = Gtk.Box(spacing=8)
-            icon_name = app.get("icon") or "application-x-executable"
-            image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
-            themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
-            texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
-            icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
-            icon.set_pixel_size(32)
-            icon.set_valign(Gtk.Align.CENTER)
-            if is_hidden:
-                icon.add_css_class("launcher-hidden-icon")
-            # The run dot sits on the icon's corner, like a dock, so the
-            # shortcut chips on the right always line up.
-            icon_slot = Gtk.Overlay()
-            icon_slot.set_valign(Gtk.Align.CENTER)
-            icon_slot.set_child(icon)
-            state = self.app_state(app)
-            if state != "stopped":
-                dot = Gtk.Box()
-                dot.add_css_class("launcher-run-dot")
-                dot.add_css_class(state)
-                dot.set_halign(Gtk.Align.END)
-                dot.set_valign(Gtk.Align.END)
-                dot.set_can_target(False)
-                icon_slot.add_overlay(dot)
-                icon_slot.set_tooltip_text(_("Open windows") if state == "active" else _("Running in background"))
-            line.append(icon_slot)
+                return False
+            return query in app["name"].casefold()
 
-            text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            text_box.set_hexpand(True)
-            text_box.set_valign(Gtk.Align.CENTER)
-
-            title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-            title_row.set_valign(Gtk.Align.CENTER)
-
-            name = Gtk.Label(label=app["name"], xalign=0)
-            name.add_css_class("launcher-app-name")
-            name.set_ellipsize(3)
-            title_row.append(name)
-
-            badges = []
-            if is_hidden:
-                badges.append(("view-conceal-symbolic", _("Hidden")))
-            if app.get("bar_widget") and not app.get("in_bar"):
-                badges.append(("list-remove-symbolic", _("Not in bar")))
-                row.add_css_class("launcher-row-hidden")
-                icon.add_css_class("launcher-hidden-icon")
-            for badge_icon, badge_text in badges:
-                badge = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
-                badge.add_css_class("launcher-hidden-badge")
-                badge.set_valign(Gtk.Align.CENTER)
-                eye_icon = Gtk.Image.new_from_icon_name(badge_icon)
-                eye_icon.set_pixel_size(11)
-                badge.append(eye_icon)
-                badge_lbl = Gtk.Label(label=badge_text)
-                badge.append(badge_lbl)
-                title_row.append(badge)
-
-            text_box.append(title_row)
-
-            desc_text = app.get("description", "").strip()
-            if desc_text:
-                desc = Gtk.Label(label=desc_text, xalign=0)
-                desc.add_css_class("launcher-app-desc")
-                desc.set_ellipsize(3)
-                text_box.append(desc)
-                prefix = "[" + _("Hidden") + "] " if is_hidden else ""
-                row.set_tooltip_text(f"{prefix}{app['name']} — {desc_text}")
-            else:
-                prefix = "[" + _("Hidden") + "] " if is_hidden else ""
-                row.set_tooltip_text(f"{prefix}{app['name']}")
-
-            line.append(text_box)
-            assigned = self.app_shortcuts(app, self.list_bindings)
-            if assigned:
-                chips = Gtk.Box(spacing=3)
-                chips.set_valign(Gtk.Align.CENTER)
-                chip = Gtk.Label(label=shortcuts.combo_label(assigned[0]).replace(" + ", "+"))
-                chip.add_css_class("launcher-shortcut-chip")
-                chips.append(chip)
-                if len(assigned) > 1:
-                    more = Gtk.Label(label=f"+{len(assigned) - 1}")
-                    more.add_css_class("launcher-shortcut-more")
-                    chips.append(more)
-                chips.set_tooltip_text((_("Global shortcuts:") + "\n" if len(assigned) > 1 else _("Global shortcut:") + " ") + "\n".join(
-                    shortcuts.combo_label(c) + (f" → {shortcuts.action_name(app, c['action'])}" if c["action"] else "")
-                    for c in assigned))
-                line.append(chips)
-            actions = Gtk.Button(icon_name="open-menu-symbolic")
-            actions.add_css_class("flat")
-            actions.set_tooltip_text(_("Tray menu") if "tray_id" in app else
-                                     _("Plugin actions") if "plugin_id" in app else _("App actions"))
-            actions.connect("clicked", lambda button, target=app: self.show_actions(button, target))
-            line.append(actions)
-            row.set_child(line)
-            row.actions_button = actions
-            motion = Gtk.EventControllerMotion()
-            def on_enter(_ctrl, _x, _y, target_row=row):
-                if self.rows.get_selected_row() != target_row:
-                    self.select_row(target_row)
-            motion.connect("enter", on_enter)
-            row.add_controller(motion)
+        def add(row):
+            nonlocal selected_row
             self.rows.append(row)
-            if selected_id and selected_id == app["desktop_id"]:
+            # A running app shows twice in the group views; keep the first.
+            if selected_row is None and selected_id and selected_id == self.row_key(row):
                 selected_row = row
-        selected_row = selected_row or self.rows.get_first_child()
+
+        if self.view in ("groups", "origin"):
+            entries = [a for a in (self.plugins if self.mode == "plugins" else self.apps) if shown(a)]
+            # Tray icons head the plugin page, as in the list; running apps the
+            # app page when the dot is on.
+            if self.mode == "plugins":
+                running = lambda a: "tray_id" in a
+            else:
+                running = (lambda a: self.app_state(a) != "stopped") if self.running_first else None
+            first = True
+            if self.view == "origin":
+                index, defaults = details.omarchy_index(), details.default_desktops()
+                sections = groups.origin_sections(
+                    entries, lambda a: details.origin_section(a, index, defaults), running)
+            else:
+                sections = groups.sections(entries, self.groups, running)
+            for gid, members in sections:
+                # Empty groups show while browsing (to fill them), not while filtering.
+                if not members and (query or gid in (groups.RUNNING, groups.OTHER, *groups.ORIGINS)):
+                    continue
+                collapsed = gid in self.groups["collapsed"] and not query
+                add(self.make_group_row(gid, len(members), collapsed, first))
+                first = False
+                if not collapsed:
+                    for app in members:
+                        add(self.make_app_row(app))
+        else:
+            entries = self.plugins if self.mode == "plugins" else self.apps
+            if self.grouping_running():
+                # Stable sort: both groups keep the usual order.
+                entries = sorted(entries, key=lambda a: self.app_state(a) == "stopped")
+            for app in entries:
+                if shown(app):
+                    add(self.make_app_row(app))
+        selected_row = selected_row or self.first_app_row() or self.rows.get_first_child()
         if selected_row:
             self.rows.select_row(selected_row)
             # Rebuilt rows need a layout before focus can scroll them into view.
             GLib.timeout_add(50, self.ensure_selected_visible, selected_row)
 
+    @staticmethod
+    def row_key(row):
+        if row is None:
+            return None
+        if hasattr(row, "group"):
+            return "group:" + row.group
+        return row.app.get("desktop_id") if hasattr(row, "app") else None
+
+    def first_app_row(self):
+        row = self.rows.get_first_child()
+        while row is not None and not hasattr(row, "app"):
+            row = row.get_next_sibling()
+        return row
+
+    def make_app_row(self, app):
+        is_hidden = app["desktop_id"] in self.hidden_ids_for(app)
+        row = Gtk.ListBoxRow()
+        row.app = app
+        row.running = self.app_state(app) != "stopped"
+        if is_hidden:
+            row.add_css_class("launcher-row-hidden")
+        line = Gtk.Box(spacing=8)
+        icon_name = app.get("icon") or "application-x-executable"
+        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
+        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
+        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
+        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+        icon.set_pixel_size(32)
+        icon.set_valign(Gtk.Align.CENTER)
+        if is_hidden:
+            icon.add_css_class("launcher-hidden-icon")
+        # The run dot sits on the icon's corner, like a dock, so the
+        # shortcut chips on the right always line up.
+        icon_slot = Gtk.Overlay()
+        icon_slot.set_valign(Gtk.Align.CENTER)
+        icon_slot.set_child(icon)
+        state = self.app_state(app)
+        if state != "stopped":
+            dot = Gtk.Box()
+            dot.add_css_class("launcher-run-dot")
+            dot.add_css_class(state)
+            dot.set_halign(Gtk.Align.END)
+            dot.set_valign(Gtk.Align.END)
+            dot.set_can_target(False)
+            icon_slot.add_overlay(dot)
+            icon_slot.set_tooltip_text(_("Open windows") if state == "active" else _("Running in background"))
+        line.append(icon_slot)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text_box.set_hexpand(True)
+        text_box.set_valign(Gtk.Align.CENTER)
+
+        title_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        title_row.set_valign(Gtk.Align.CENTER)
+
+        name = Gtk.Label(label=app["name"], xalign=0)
+        name.add_css_class("launcher-app-name")
+        name.set_ellipsize(3)
+        title_row.append(name)
+
+        badges = []
+        if is_hidden:
+            badges.append(("view-conceal-symbolic", _("Hidden")))
+        if app.get("bar_widget") and not app.get("in_bar"):
+            badges.append(("list-remove-symbolic", _("Not in bar")))
+            row.add_css_class("launcher-row-hidden")
+            icon.add_css_class("launcher-hidden-icon")
+        for badge_icon, badge_text in badges:
+            badge = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=3)
+            badge.add_css_class("launcher-hidden-badge")
+            badge.set_valign(Gtk.Align.CENTER)
+            eye_icon = Gtk.Image.new_from_icon_name(badge_icon)
+            eye_icon.set_pixel_size(11)
+            badge.append(eye_icon)
+            badge_lbl = Gtk.Label(label=badge_text)
+            badge.append(badge_lbl)
+            title_row.append(badge)
+
+        text_box.append(title_row)
+
+        desc_text = app.get("description", "").strip()
+        if desc_text:
+            desc = Gtk.Label(label=desc_text, xalign=0)
+            desc.add_css_class("launcher-app-desc")
+            desc.set_ellipsize(3)
+            text_box.append(desc)
+            prefix = "[" + _("Hidden") + "] " if is_hidden else ""
+            row.set_tooltip_text(f"{prefix}{app['name']} — {desc_text}")
+        else:
+            prefix = "[" + _("Hidden") + "] " if is_hidden else ""
+            row.set_tooltip_text(f"{prefix}{app['name']}")
+
+        line.append(text_box)
+        assigned = self.app_shortcuts(app, self.list_bindings)
+        if assigned:
+            chips = Gtk.Box(spacing=3)
+            chips.set_valign(Gtk.Align.CENTER)
+            chip = Gtk.Label(label=shortcuts.combo_label(assigned[0]).replace(" + ", "+"))
+            chip.add_css_class("launcher-shortcut-chip")
+            chips.append(chip)
+            if len(assigned) > 1:
+                more = Gtk.Label(label=f"+{len(assigned) - 1}")
+                more.add_css_class("launcher-shortcut-more")
+                chips.append(more)
+            chips.set_tooltip_text((_("Global shortcuts:") + "\n" if len(assigned) > 1 else _("Global shortcut:") + " ") + "\n".join(
+                shortcuts.combo_label(c) + (f" → {shortcuts.action_name(app, c['action'])}" if c["action"] else "")
+                for c in assigned))
+            line.append(chips)
+        actions = Gtk.Button(icon_name="open-menu-symbolic")
+        actions.add_css_class("flat")
+        actions.set_tooltip_text(_("Tray menu") if "tray_id" in app else
+                                 _("Plugin actions") if "plugin_id" in app else _("App actions"))
+        actions.connect("clicked", lambda button, target=app: self.show_actions(button, target))
+        line.append(actions)
+        row.set_child(line)
+        row.actions_button = actions
+        motion = Gtk.EventControllerMotion()
+        def on_enter(_ctrl, _x, _y, target_row=row):
+            if self.rows.get_selected_row() != target_row:
+                self.select_row(target_row)
+        motion.connect("enter", on_enter)
+        row.add_controller(motion)
+        return row
+
+    def grouping_running(self):
+        return self.view == "list" and self.mode == "apps" and self.running_first
+
+    def make_group_row(self, gid, count, collapsed, first):
+        """A group's heading in the group view: click or Enter folds it, ☰
+        (or Right) has rename, move, delete and new group."""
+        row = Gtk.ListBoxRow()
+        row.group = gid
+        row.add_css_class("launcher-group-row")
+        if not first:
+            row.add_css_class("launcher-group-row-next")
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        outer.add_css_class("launcher-group-band")
+        line = Gtk.Box(spacing=8)
+        chevron = Gtk.Image.new_from_icon_name("pan-end-symbolic" if collapsed else "pan-down-symbolic")
+        chevron.set_pixel_size(14)
+        chevron.add_css_class("launcher-group-chevron")
+        line.append(chevron)
+        title = Gtk.Label(label=groups.display_name(gid, self.groups, self.mode), xalign=0)
+        title.add_css_class("launcher-group-title")
+        line.append(title)
+        number = Gtk.Label(label=str(count))
+        number.add_css_class("launcher-group-count")
+        number.set_valign(Gtk.Align.CENTER)
+        line.append(number)
+        spacer = Gtk.Box()
+        spacer.set_hexpand(True)
+        line.append(spacer)
+        row.actions_button = None
+        # Running and the origin sections are fixed: nothing to rename or move.
+        if gid != groups.RUNNING and gid not in groups.ORIGINS:
+            menu = Gtk.Button(icon_name="open-menu-symbolic")
+            menu.add_css_class("flat")
+            menu.add_css_class("launcher-group-menu")
+            menu.set_tooltip_text(_("Group actions"))
+            menu.connect("clicked", lambda button, g=gid: self.show_group_actions(button, g))
+            line.append(menu)
+            row.actions_button = menu
+        outer.append(line)
+        row.set_child(outer)
+        row.set_tooltip_text(_("Show this group (Enter, Right)") if collapsed else _("Fold this group (Enter, Left)"))
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_a, target_row=row: self.rows.get_selected_row() != target_row
+                       and self.select_row(target_row))
+        row.add_controller(motion)
+        return row
+
+    def toggle_group(self, gid):
+        groups.toggle_collapsed(self.groups, gid)
+        self.save_groups()
+        self.refresh_list(selected_id="group:" + gid)
+        if gid not in self.groups["collapsed"]:
+            # After the selection has scrolled to the heading (50 ms).
+            GLib.timeout_add(80, self.reveal_group, gid)
+
+    def reveal_group(self, gid):
+        """Scroll so an unfolded group shows: as many of its entries as fit,
+        the heading never above the top. A heading at the bottom of the
+        list otherwise unfolds out of sight."""
+        header = self.rows.get_first_child()
+        while header is not None and getattr(header, "group", None) != gid:
+            header = header.get_next_sibling()
+        if header is None:
+            return GLib.SOURCE_REMOVE
+        last = header
+        while (following := last.get_next_sibling()) is not None and not hasattr(following, "group"):
+            last = following
+        ok_top, top = header.compute_bounds(self.rows)
+        ok_bottom, bottom = last.compute_bounds(self.rows)
+        if not (ok_top and ok_bottom):
+            return GLib.SOURCE_REMOVE
+        adjustment = self.scroller.get_vadjustment()
+        start, end = top.get_y(), bottom.get_y() + bottom.get_height()
+        if end > adjustment.get_value() + adjustment.get_page_size():
+            adjustment.set_value(max(0, min(start, end - adjustment.get_page_size())))
+        return GLib.SOURCE_REMOVE
+
+    def save_groups(self):
+        try:
+            groups.save(self.groups_all)
+        except OSError as error:
+            self.notify(_("Could not save the groups"), str(error))
+
     def list_header(self, row, before):
-        """Section titles in the widget list: tray icons, then plugins."""
+        """Section titles in the widget list: tray icons, then plugins. In the
+        app list with the running toggle on: a "Running" group, closed by a rule.
+        The group view draws its own heading rows."""
+        if self.view != "list":
+            row.set_header(None)
+            return
+        if self.grouping_running() and hasattr(row, "app"):
+            if before is None and row.running:
+                title = Gtk.Label(label=_("Running"), xalign=0)
+                title.add_css_class("sc-section")
+                title.set_margin_start(8)
+                title.set_margin_bottom(2)
+                row.set_header(title)
+            elif before is not None and getattr(before, "running", False) and not row.running:
+                rule = Gtk.Separator()
+                rule.add_css_class("launcher-settings-rule")
+                rule.set_margin_top(6)
+                rule.set_margin_bottom(6)
+                row.set_header(rule)
+            else:
+                row.set_header(None)
+            return
         if self.mode != "plugins" or not hasattr(row, "app"):
             row.set_header(None)
             return
@@ -1284,6 +1580,9 @@ class Launcher(Gtk.Application):
             self.activate_row(self.rows, row)
 
     def activate_row(self, _list, row):
+        if hasattr(row, "group"):
+            self.toggle_group(row.group)
+            return
         self.launch(row.app, row.actions_button)
 
     def launch(self, app, button=None):
@@ -1471,6 +1770,13 @@ class Launcher(Gtk.Application):
                 add_separator()
             add_action(_("Shortcut…"), lambda: self.open_shortcut_page(app),
                        "preferences-desktop-keyboard-shortcuts-symbolic")
+            add_separator()
+        if "tray_id" not in app:
+            page = self.groups_all["plugins" if is_widget(app) else "apps"]
+            add_action(_("Group: {0}").format(groups.display_name(groups.group_of(app, page), page)),
+                       lambda: self.fill_group_choice(popover, app), "folder-symbolic",
+                       keep_open=True, end_icon="go-next-symbolic")
+            add_action(_("Details…"), lambda: self.open_details_page(app), "dialog-information-symbolic")
             add_separator()
         hidden = app["desktop_id"] in self.hidden_by_mode["plugins" if is_widget(app) else "apps"]
         # Out of the bar, a widget is hidden by that already: Hide would do nothing.
@@ -1686,6 +1992,134 @@ class Launcher(Gtk.Application):
 
         process.communicate_utf8_async(None, None, done)
 
+    def menu_item(self, box, label, icon, callback, note=None, destructive=False, end_icon=None, sensitive=True):
+        """One entry of a menu filled by hand (bar sections, groups)."""
+        button = Gtk.Button()
+        button.add_css_class("flat")
+        button.add_css_class("launcher-menu-item")
+        if destructive:
+            button.add_css_class("destructive")
+        self.focus_follows_pointer(button)
+        line = Gtk.Box(spacing=8)
+        for side in ("start", "end"):
+            getattr(line, f"set_margin_{side}")(8)
+        line.set_margin_top(6)
+        line.set_margin_bottom(6)
+        image = Gtk.Image.new_from_icon_name(icon) if icon else Gtk.Image()
+        image.set_pixel_size(14)
+        line.append(image)
+        text = Gtk.Label(label=label, xalign=0)
+        text.set_hexpand(True)
+        line.append(text)
+        if note:
+            tag = Gtk.Label(label=note)
+            tag.add_css_class("launcher-shortcut-chip")
+            line.append(tag)
+        if end_icon:
+            line.append(Gtk.Image.new_from_icon_name(end_icon))
+        button.set_child(line)
+        button.set_sensitive(sensitive)
+        button.text_label = text
+        button.connect("clicked", lambda *_: callback())
+        box.append(button)
+        return button
+
+    @staticmethod
+    def menu_box():
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(box, f"set_margin_{side}")(4)
+        return box
+
+    @staticmethod
+    def menu_title(box, text):
+        title = Gtk.Label(label=text, xalign=0)
+        title.add_css_class("sc-section")
+        title.set_margin_start(8)
+        title.set_ellipsize(3)
+        box.append(title)
+
+    @staticmethod
+    def menu_separator(box):
+        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        separator.add_css_class("launcher-menu-separator")
+        box.append(separator)
+
+    def fill_group_choice(self, popover, app):
+        """Second level of Group: the group this entry belongs in."""
+        box = self.menu_box()
+        self.menu_item(box, _("Back"), "go-previous-symbolic", lambda: self.fill_actions(popover, app))
+        self.menu_title(box, _("Group for {0}").format(app["name"]))
+        current = groups.group_of(app, self.groups)
+        focus = None
+        for gid in [g["id"] for g in self.groups["groups"]] + [groups.OTHER]:
+            item = self.menu_item(box, groups.display_name(gid, self.groups),
+                                  "object-select-symbolic" if gid == current else None,
+                                  lambda g=gid: (popover.popdown(), self.put_in_group(app, g)))
+            if gid == current:
+                focus = item
+        self.menu_separator(box)
+        self.menu_item(box, _("New group…"), "list-add-symbolic",
+                       lambda: (popover.popdown(), self.open_group_name_page(None, app)))
+        popover.set_child(box)
+        self.focus_first_entry(box, focus)
+
+    def put_in_group(self, app, gid):
+        try:
+            groups.assign(self.groups, app["desktop_id"], gid)
+        except ValueError:
+            return
+        self.save_groups()
+        self.refresh_list(selected_id=app["desktop_id"])
+
+    def show_group_actions(self, button, gid):
+        if self.actions_menu_open():
+            self.actions_popover.popdown()
+        popover = Gtk.Popover()
+        popover.add_css_class("launcher-popover")
+        popover.set_parent(button)
+        self.actions_popover = popover
+        popover.connect("closed", self.on_actions_closed)
+        keys = Gtk.EventControllerKey()
+        keys.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", lambda _c, key, _code, _state: self.close_actions_on_left(popover, key))
+        popover.add_controller(keys)
+        box = self.menu_box()
+        ids = [g["id"] for g in self.groups["groups"]]
+        if gid in ids:
+            index = ids.index(gid)
+            name = groups.display_name(gid, self.groups)
+            self.menu_item(box, _("Rename…"), "document-edit-symbolic",
+                           lambda: (popover.popdown(), self.open_group_name_page(gid)))
+            self.menu_item(box, _("Move up"), "go-up-symbolic", lambda: (popover.popdown(), self.move_group(gid, -1)),
+                           sensitive=index > 0)
+            self.menu_item(box, _("Move down"), "go-down-symbolic", lambda: (popover.popdown(), self.move_group(gid, 1)),
+                           sensitive=index < len(ids) - 1)
+            # Asks in place: the first click turns the entry into the question.
+            delete = None
+
+            def ask_or_delete():
+                if getattr(delete, "asked", False):
+                    popover.popdown()
+                    groups.delete_group(self.groups, gid)
+                    self.save_groups()
+                    self.refresh_list()
+                else:
+                    delete.asked = True
+                    delete.text_label.set_label(_("Really delete “{0}”? Its entries move back.").format(name))
+            delete = self.menu_item(box, _("Delete group"), "user-trash-symbolic", ask_or_delete, destructive=True)
+            self.menu_separator(box)
+        self.menu_item(box, _("New group…"), "list-add-symbolic",
+                       lambda: (popover.popdown(), self.open_group_name_page(None)))
+        popover.set_child(box)
+        self.focus_first_entry(box)
+        popover.popup()
+
+    def move_group(self, gid, delta):
+        if groups.move_group(self.groups, gid, delta):
+            self.save_groups()
+            self.refresh_list(selected_id="group:" + gid)
+
     def fill_bar_sections(self, popover, app):
         """Second level of Add to bar: the section to put the widget in."""
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -1803,7 +2237,7 @@ class Launcher(Gtk.Application):
         # Names come from apps, plugins and tray menus; notification daemons
         # render markup, so none of it may reach them as markup.
         try:
-            subprocess.Popen(["notify-send", "-a", "Launch & Bind", plain_text(title), plain_text(body)],
+            subprocess.Popen(["notify-send", "-a", "App Manager", plain_text(title), plain_text(body)],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError:
             pass
@@ -2050,20 +2484,16 @@ class Launcher(Gtk.Application):
         self.back_button.add_css_class("launcher-back-bordered")
         self.title.add_css_class("launcher-section-title")
         self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
-        self.back_button.set_visible(True)
-        for button in (self.hidden_button, self.mode_button, self.settings_button):
-            button.set_visible(False)
+        self.hide_main_header()
         self.stack.set_visible_child_name("settings")
         self.update_title()
         self.language_dropdown.grab_focus()
 
     def close_settings_page(self):
-        self.back_button.set_visible(False)
         self.back_chip.add_css_class("launcher-shortcut-chip")
         self.back_button.remove_css_class("launcher-back-bordered")
         self.title.remove_css_class("launcher-section-title")
-        for button in (self.hidden_button, self.mode_button, self.settings_button):
-            button.set_visible(True)
+        self.show_main_header()
         self.stack.set_visible_child_name("list")
         self.update_title()
         self.refresh_list()
@@ -2071,8 +2501,356 @@ class Launcher(Gtk.Application):
     def close_subpage(self):
         if self.settings_open():
             self.close_settings_page()
+        elif self.aux_page_open():
+            self.close_aux_page()
         else:
             self.close_shortcut_page()
+
+    def hide_main_header(self):
+        self.back_button.set_visible(True)
+        for button in (self.hidden_button, self.mode_button, self.running_button, self.view_button,
+                       self.settings_button):
+            button.set_visible(False)
+
+    def show_main_header(self):
+        """The list's header buttons."""
+        self.back_button.set_visible(False)
+        for button in (self.hidden_button, self.view_button, self.mode_button, self.settings_button):
+            button.set_visible(True)
+        self.running_button.set_visible(self.mode == "apps")
+
+    def toggle_view(self, view=None):
+        """Switch to view ("list", "groups" or "origin"), or to the next one."""
+        if self.actions_menu_open():
+            self.actions_popover.popdown()
+        order = ("list", "groups", "origin")
+        view = view if view in order else order[(order.index(self.view) + 1) % len(order)]
+        if view == self.view:
+            return
+        self.view = view
+        try:
+            set_view(self.view)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        row = self.rows.get_selected_row()
+        self.update_hidden_button_state()
+        self.refresh_list(selected_id=self.row_key(row) if row is not None and hasattr(row, "app") else "")
+
+    # --- group name and details pages ------------------------------------------
+
+    def aux_page_open(self):
+        return self.stack.get_visible_child_name() in ("groupname", "details")
+
+    def open_aux_page(self, name, title, backspace_goes_back):
+        if self.actions_menu_open():
+            self.actions_popover.popdown()
+        self.aux_title = title
+        if backspace_goes_back:
+            self.back_chip.set_label("· ⌫")
+            self.back_chip.remove_css_class("launcher-shortcut-chip")
+            self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
+        else:
+            self.back_chip.set_label("Esc")
+            self.back_chip.add_css_class("launcher-shortcut-chip")
+            self.back_button.set_tooltip_text(_("Back (Esc)"))
+        self.back_button.add_css_class("launcher-back-bordered")
+        self.title.add_css_class("launcher-section-title")
+        self.hide_main_header()
+        self.stack.set_visible_child_name(name)
+        self.update_title()
+        # Keys go to the page, not into a selectable value (which would select it all).
+        self.back_button.grab_focus()
+
+    def close_aux_page(self, refresh=True):
+        self.details_token += 1  # Late facts of the closed page are dropped.
+        self.back_chip.set_label("Esc")
+        self.back_chip.add_css_class("launcher-shortcut-chip")
+        self.back_button.remove_css_class("launcher-back-bordered")
+        self.title.remove_css_class("launcher-section-title")
+        self.show_main_header()
+        self.stack.set_visible_child_name("list")
+        self.update_title()
+        if refresh:
+            self.refresh_list()
+
+    def build_group_name_page(self):
+        page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        page.set_margin_start(4)
+        page.set_margin_end(4)
+        page.set_size_request(-1, LIST_HEIGHT)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("launcher-settings-rule")
+        page.append(rule)
+        prompt = Gtk.Label(label=_("Name of the group"), xalign=0)
+        prompt.add_css_class("launcher-setting-label")
+        page.append(prompt)
+        entry = Gtk.Entry()
+        entry.set_max_length(groups.MAX_NAME)
+        self.guard_text_field(entry)
+        entry.set_placeholder_text(_("e.g. Office, Media, Work"))
+        entry.connect("activate", lambda *_: self.save_group_name())
+        page.append(entry)
+        error = Gtk.Label(xalign=0, wrap=True)
+        error.add_css_class("launcher-group-error")
+        error.set_visible(False)
+        page.append(error)
+        buttons = Gtk.Box(spacing=6)
+        buttons.set_halign(Gtk.Align.END)
+        save = Gtk.Button(label=_("Save"))
+        save.add_css_class("sc-primary")
+        save.connect("clicked", lambda *_: self.save_group_name())
+        buttons.append(save)
+        page.append(buttons)
+        self.group_entry, self.group_error, self.group_prompt = entry, error, prompt
+        self.stack.add_named(page, "groupname")
+
+    def guard_text_field(self, entry):
+        """Route every way text can enter the field from another client
+        through bounded reads. GTK's own paste, middle-click paste and text
+        drops buffer the whole offer in memory with no limit or deadline."""
+        text = entry.get_delegate()
+        # Ctrl+V, Shift+Insert and the context menu's Paste all emit this.
+        text.connect("paste-clipboard", self.on_field_paste, entry)
+        # Middle-click pastes the primary selection: claim button 2 first.
+        middle = Gtk.GestureClick(button=Gdk.BUTTON_MIDDLE)
+        middle.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        middle.connect("pressed", lambda gesture, *_: gesture.set_state(Gtk.EventSequenceState.CLAIMED))
+        entry.add_controller(middle)
+        # Text dropped on the field: remove the field's own (unbounded) drop target.
+        controllers = text.observe_controllers()
+        for i in reversed(range(controllers.get_n_items())):
+            controller = controllers.get_item(i)
+            if isinstance(controller, (Gtk.DropTarget, Gtk.DropTargetAsync)):
+                text.remove_controller(controller)
+
+    def on_field_paste(self, text, entry):
+        text.stop_emission_by_name("paste-clipboard")
+
+        def worker():
+            pasted = clipboard_text(groups.MAX_NAME)
+            GLib.idle_add(self.insert_pasted, entry, pasted)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def insert_pasted(self, entry, pasted):
+        if pasted is None:
+            self.notify(_("Clipboard text is too long to paste"))
+        elif pasted:
+            entry.delete_selection()
+            position = entry.insert_text(pasted, entry.get_position())
+            entry.set_position(position)
+        return GLib.SOURCE_REMOVE
+
+    def open_group_name_page(self, gid, app=None):
+        """Name a new group (and put app in it), or rename group gid."""
+        self.group_name_target = (gid, app)
+        self.group_entry.set_text(groups.display_name(gid, self.groups) if gid else "")
+        self.group_error.set_visible(False)
+        self.group_prompt.set_label(_("New name for “{0}”").format(groups.display_name(gid, self.groups)) if gid
+                                    else _("Name of the new group") if app is None
+                                    else _("Name of the new group for {0}").format(app["name"]))
+        self.open_aux_page("groupname", _("Rename group") if gid else _("New group"), backspace_goes_back=False)
+        self.group_entry.grab_focus()
+
+    def save_group_name(self):
+        gid, app = self.group_name_target or (None, None)
+        try:
+            if gid:
+                groups.rename_group(self.groups, gid, self.group_entry.get_text())
+            else:
+                gid = groups.add_group(self.groups, self.group_entry.get_text())
+                if app is not None:
+                    groups.assign(self.groups, app["desktop_id"], gid)
+        except ValueError as error:
+            self.group_error.set_label(str(error))
+            self.group_error.set_visible(True)
+            return
+        self.save_groups()
+        self.group_name_target = None
+        # Show where it went: the group view, on the group or the moved entry.
+        if self.view != "groups":
+            self.view = "groups"
+            try:
+                set_view(self.view)
+            except OSError:
+                pass
+            self.update_hidden_button_state()
+        self.groups["collapsed"] = [g for g in self.groups["collapsed"] if g != gid]
+        self.close_aux_page(refresh=False)
+        self.refresh_list(selected_id=app["desktop_id"] if app is not None else "group:" + gid)
+
+    def build_details_page(self):
+        page = Gtk.ScrolledWindow()
+        page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
+        page.set_min_content_height(LIST_HEIGHT)
+        page.set_max_content_height(LIST_HEIGHT)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("launcher-settings-rule")
+        box.append(rule)
+        top = Gtk.Box(spacing=12)
+        icon_slot = Gtk.Box()
+        top.append(icon_slot)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        names.set_valign(Gtk.Align.CENTER)
+        names.set_hexpand(True)
+        name = Gtk.Label(xalign=0, wrap=True)
+        name.add_css_class("launcher-details-name")
+        names.append(name)
+        desc = Gtk.Label(xalign=0, wrap=True)
+        desc.add_css_class("launcher-app-desc")
+        names.append(desc)
+        top.append(names)
+        box.append(top)
+        grid = Gtk.Grid(column_spacing=10, row_spacing=8)
+        box.append(grid)
+        page.set_child(box)
+        self.details_icon_slot, self.details_name, self.details_desc, self.details_grid = icon_slot, name, desc, grid
+        self.stack.add_named(page, "details")
+
+    def open_details_page(self, app):
+        self.details_token += 1
+        token = self.details_token
+        while (child := self.details_icon_slot.get_first_child()) is not None:
+            self.details_icon_slot.remove(child)
+        icon_name = app.get("icon") or "application-x-executable"
+        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
+        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else \
+            Gtk.Image.new_from_icon_name(Path(icon_name).name)
+        icon.set_pixel_size(48)
+        self.details_icon_slot.append(icon)
+        self.details_name.set_label(app["name"])
+        self.details_desc.set_label(app.get("description", "").strip())
+        self.details_desc.set_visible(bool(app.get("description", "").strip()))
+        self.fill_details([(_("Reading…"), "")])
+        self.open_aux_page("details", _("Details"), backspace_goes_back=True)
+
+        def work():
+            try:
+                facts = details.plugin_facts(app, plugin_manifests()) if "plugin_id" in app else details.app_facts(app)
+            except Exception as error:  # A broken entry must not take the page down.
+                facts = {"error": str(error)}
+            GLib.idle_add(lambda: token == self.details_token and self.fill_details(self.details_rows(app, facts)))
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def format_date(timestamp):
+        try:
+            return GLib.DateTime.new_from_unix_local(int(timestamp)).format("%x %H:%M")
+        except (TypeError, ValueError, OverflowError):
+            return ""
+
+    def details_rows(self, app, facts):
+        kinds = {"app": _("App"), "webapp": _("Web app"), "terminal": _("Terminal app"),
+                 "flatpak": _("Flatpak or Snap app"), "appimage": _("AppImage"),
+                 "plugin": _("Shell plugin"), "widget": _("Bar widget")}
+        origins = {"bundled": _("Comes with Omarchy"), "installed": _("Installed with Omarchy"),
+                   "optional": _("Optional Omarchy package"), "builtin": _("Built into Omarchy")}
+        roles = {"browser": _("Web browser"), "terminal": _("Terminal"), "email": _("Email"),
+                 "files": _("Files"), "editor": _("Text editor"), "images": _("Images"),
+                 "video": _("Videos"), "music": _("Music"), "pdf": _("PDF documents")}
+        page = self.groups_all["plugins" if is_widget(app) else "apps"]
+        rows = [(_("Type"), kinds.get(facts.get("kind"), "")),
+                (_("Omarchy"), origins.get(facts.get("omarchy"), "")),
+                (_("Default app for"), ", ".join(roles[r] for r in facts.get("roles", ()) if r in roles)),
+                (_("Group"), groups.display_name(groups.group_of(app, page), page)),
+                (_("ID"), facts.get("id", ""))]
+        if facts.get("kind") == "widget":
+            rows.append((_("In the bar"), _("Yes") if facts.get("in_bar") else _("No")))
+        for key, label in (("version", _("Version")), ("author", _("Author")), ("license", _("License"))):
+            rows.append((label, facts.get(key, "")))
+        rows += [(_("Desktop file"), facts.get("desktop_file", ""), True),
+                 (_("Command"), facts.get("command", "")),
+                 (_("Program"), facts.get("program") or "", True),
+                 (_("Folder"), facts.get("folder", ""), True)]
+        package = facts.get("package")
+        if package:
+            rows += [(_("Package"), f"{package['name']} {package.get('version', '')}".strip()),
+                     (_("Installed size"), GLib.format_size(package["size"]) if "size" in package else ""),
+                     (_("Installed or updated"), self.format_date(package.get("installed"))),
+                     (_("Website"), package.get("url", ""), True)]
+        if facts.get("website"):
+            rows.append((_("Website"), facts["website"], True))
+        if "size" in facts:
+            size = GLib.format_size(facts["size"])
+            rows.append((_("Size on disk"), size if facts.get("size_complete", True) else _("more than {0}").format(size)))
+        if "file_size" in facts:
+            rows += [(_("File size"), GLib.format_size(facts["file_size"])),
+                     (_("Last changed"), self.format_date(facts.get("modified")))]
+        source = facts.get("source")
+        if source:
+            rows += [(_("Source"), source.get("url") or "", True),
+                     (_("Commit"), source.get("commit") or ""),
+                     (_("Installed"), self.format_date(source.get("cloned")))]
+        if facts.get("error"):
+            rows.append((_("Error"), facts["error"]))
+        return [row for row in rows if row[1]]
+
+    def fill_details(self, rows):
+        grid = self.details_grid
+        while (child := grid.get_first_child()) is not None:
+            grid.remove(child)
+        for index, (label, value, *copyable) in enumerate(rows):
+            caption = Gtk.Label(label=label, xalign=0, yalign=0)
+            caption.add_css_class("launcher-setting-label")
+            caption.set_size_request(120, -1)
+            grid.attach(caption, 0, index, 1, 1)
+            text = Gtk.Label(label=details.short(value, 600), xalign=0, wrap=True, selectable=True)
+            text.set_focusable(False)  # Still selectable with the mouse, to copy a path.
+            text.set_wrap_mode(2)  # Pango WORD_CHAR: long paths break anywhere.
+            text.set_max_width_chars(34)
+            text.set_hexpand(True)
+            text.add_css_class("launcher-details-value")
+            grid.attach(text, 1, index, 1, 1)
+            if copyable and copyable[0]:
+                copy = Gtk.Button(icon_name="edit-copy-symbolic")
+                copy.add_css_class("flat")
+                copy.add_css_class("launcher-copy-btn")
+                copy.set_valign(Gtk.Align.START)
+                copy.set_tooltip_text(_("Copy"))
+                copy.connect("clicked", lambda button, v=value: self.copy_text(button, v))
+                grid.attach(copy, 2, index, 1, 1)
+                address = self.web_link(value)
+                if address:
+                    visit = Gtk.Button(icon_name="web-browser-symbolic")
+                    visit.add_css_class("flat")
+                    visit.add_css_class("launcher-copy-btn")
+                    visit.set_valign(Gtk.Align.START)
+                    visit.set_tooltip_text(_("Open website"))
+                    visit.connect("clicked", lambda _b, a=address: self.open_website(a))
+                    grid.attach(visit, 3, index, 1, 1)
+        return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def web_link(value):
+        """An http(s) address to open, or None. A git remote opens its web
+        page (https://github.com/a/b.git -> https://github.com/a/b)."""
+        text = str(value or "").strip()
+        if not re.fullmatch(r"https?://[^\s<>\"']{1,2000}", text):
+            return None
+        return text[:-4] if text.endswith(".git") else text
+
+    def open_website(self, address):
+        """Open the address in the default browser. The popup stays open:
+        the browser taking the focus must not close it."""
+        self.keep_open_until = time.monotonic() + 5
+        try:
+            Gio.AppInfo.launch_default_for_uri(address, None)
+        except GLib.Error as error:
+            self.notify(_("Could not open the website"), error.message)
+
+    def copy_text(self, button, text):
+        """Put text on the clipboard; the button shows a check for a moment."""
+        try:
+            self.window.get_clipboard().set(text)
+        except Exception as error:  # No clipboard: say so instead of failing silently.
+            self.notify(_("Could not copy"), str(error))
+            return
+        button.set_icon_name("object-select-symbolic")
+        button.set_tooltip_text(_("Copied"))
+        GLib.timeout_add(1500, lambda: (button.set_icon_name("edit-copy-symbolic"),
+                                        button.set_tooltip_text(_("Copy")), GLib.SOURCE_REMOVE)[-1])
 
     def open_shortcut_page(self, app):
         if shortcuts.app_launch_argv(app) is None:
@@ -2100,10 +2878,7 @@ class Launcher(Gtk.Application):
         self.set_shortcut_combo(shortcuts.load_default_mods(), None, None)
         self.back_chip.set_label("Esc")
         self.back_button.set_tooltip_text(_("Back to apps (Esc)"))
-        self.back_button.set_visible(True)
-        self.hidden_button.set_visible(False)
-        self.mode_button.set_visible(False)
-        self.settings_button.set_visible(False)
+        self.hide_main_header()
         self.stack.set_visible_child_name("shortcut")
         self.update_title()
         self.set_shortcut_inhibit(True)
@@ -2114,10 +2889,7 @@ class Launcher(Gtk.Application):
         self.set_shortcut_inhibit(False)
         self.shortcut_app = None
         self.sc_editing = None
-        self.back_button.set_visible(False)
-        self.hidden_button.set_visible(True)
-        self.mode_button.set_visible(True)
-        self.settings_button.set_visible(True)
+        self.show_main_header()
         self.stack.set_visible_child_name("list")
         self.update_title()
         if focus_list:
@@ -2141,7 +2913,17 @@ class Launcher(Gtk.Application):
             pass
 
     def app_shortcuts(self, app, bindings):
-        """Combos that open app right now: launcher ones, then external ones."""
+        """Combos that open app right now: launcher ones, then external ones.
+        Remembered per shortcut state and bindings snapshot (one per refresh)."""
+        key = (id(self.shortcut_state), id(bindings))
+        if getattr(self, "_shortcut_key", None) != key:
+            self._shortcut_key, self._shortcut_memo = key, {}
+        ident = shortcuts.app_key(app)
+        if ident not in self._shortcut_memo:
+            self._shortcut_memo[ident] = self._app_shortcuts(app, bindings)
+        return [dict(c) for c in self._shortcut_memo[ident]]
+
+    def _app_shortcuts(self, app, bindings):
         entry = self.shortcut_state["apps"].get(shortcuts.app_key(app), {"shortcuts": [], "disabled": []})
         disabled_ids = {shortcuts.combo_id(c) for c in entry["disabled"]}
         owned_ids = shortcuts.owned_ids(self.shortcut_state)
@@ -2472,7 +3254,7 @@ class Launcher(Gtk.Application):
         if button_style:
             self.sc_apply_button.add_css_class(button_style)
         if self.sc_editing and button_label in (None, "Assign"):
-            button_label = "Change"
+            button_label = N_("Change")
         self.sc_apply_button.set_label(_(button_label or "Assign"))
         self.sc_apply_button.set_sensitive(enabled)
 
@@ -2531,12 +3313,12 @@ class Launcher(Gtk.Application):
                 self.set_shortcut_status(_("That is the current key — press a different one, or pick "
                                            "something else to open."), "sc-info")
             else:
-                self.set_shortcut_status(_("✓ Same key, now opens {0}.").format(target), "sc-free", "Change", None, True)
+                self.set_shortcut_status(_("✓ Same key, now opens {0}.").format(target), "sc-free", N_("Change"), None, True)
             return
         if level == shortcuts.RETARGET:
             was = self.shortcut_target(self.shortcut_app, {"action": owner})
             self.set_shortcut_status(_("Opens {0} now — assigning makes it open {1}.").format(was, target),
-                                     "sc-info", "Change", None, True)
+                                     "sc-info", N_("Change"), None, True)
             return
         if level == shortcuts.FREE:
             tip = "" if "SUPER" in combo["mods"] else " " + _("Without Super, apps can no longer receive it.")
@@ -2546,15 +3328,15 @@ class Launcher(Gtk.Application):
             self.set_shortcut_status(_("Already opens {0} — nothing to add.").format(target + source), "sc-info")
         elif level == shortcuts.LAUNCHER:
             self.set_shortcut_status(_("Opens {0} now. Assigning moves it to {1}.").format(owner, target),
-                                     "sc-warn", "Move here", "sc-warn-btn", True)
+                                     "sc-warn", N_("Move here"), "sc-warn-btn", True)
         elif level == shortcuts.CUSTOM:
             self.set_shortcut_status(_("Your binding “{0}”. Assigning turns it off while this shortcut "
                                        "exists; removing the shortcut brings it back.").format(owner),
-                                     "sc-warn", "Rebind", "sc-warn-btn", True)
+                                     "sc-warn", N_("Rebind"), "sc-warn-btn", True)
         else:
             self.set_shortcut_status(_("Omarchy default “{0}”. Assigning turns it off while this shortcut "
                                        "exists; removing the shortcut brings it back.").format(owner),
-                                     "sc-hint-omarchy", "Rebind", "sc-omarchy-btn", True)
+                                     "sc-hint-omarchy", N_("Rebind"), "sc-omarchy-btn", True)
 
     def on_shortcut_key(self, controller, keyval, keycode, state):
         if self.shortcut_app is None:
@@ -2712,10 +3494,10 @@ class Launcher(Gtk.Application):
         if hidden:
             row = self.rows.get_first_child()
             while row:
-                if row.app["desktop_id"] == selected_id:
+                if hasattr(row, "app") and row.app["desktop_id"] == selected_id:
                     target = row.get_next_sibling() or row.get_prev_sibling()
                     if target:
-                        selected_id = target.app["desktop_id"]
+                        selected_id = self.row_key(target)
                     break
                 row = row.get_next_sibling()
         if hidden:
@@ -2734,6 +3516,9 @@ class Launcher(Gtk.Application):
         if getattr(self, "shortcut_app", None) is not None:
             self.title.set_label(self.shortcut_app["name"])
             return
+        if hasattr(self, "stack") and self.aux_page_open():
+            self.title.set_label(self.aux_title.upper())
+            return
         label = _("Widgets & Plugins") if self.mode == "plugins" else _("Apps")
         if self.show_hidden:
             label += " (" + _("Showing hidden") + ")"
@@ -2744,7 +3529,7 @@ class Launcher(Gtk.Application):
     def update_hidden_button_state(self):
         if not hasattr(self, "hidden_button"):
             return
-        what = "plugins" if self.mode == "plugins" else "apps"
+        what = self.list_kind
         if self.show_hidden:
             self.hidden_button.set_icon_name("view-conceal-symbolic")
             self.hidden_button.set_tooltip_text(_("Hide hidden plugins") if what == "plugins" else _("Hide hidden apps"))
@@ -2753,6 +3538,22 @@ class Launcher(Gtk.Application):
             self.hidden_button.set_icon_name("view-reveal-symbolic")
             self.hidden_button.set_tooltip_text(_("Show hidden plugins") if what == "plugins" else _("Show hidden apps"))
             self.hidden_button.remove_css_class("launcher-toggle-active")
+        self.view_buttons["list"].set_tooltip_text(_("List view (Ctrl+G)"))
+        self.view_buttons["groups"].set_tooltip_text(_("Group view (Ctrl+G)"))
+        self.view_buttons["origin"].set_tooltip_text(_("By origin: your default apps, Omarchy, other (Ctrl+G)"))
+        for view, button in self.view_buttons.items():
+            if view == self.view:
+                button.add_css_class("launcher-toggle-active")
+            else:
+                button.remove_css_class("launcher-toggle-active")
+        if self.stack.get_visible_child_name() == "list":
+            self.show_main_header()
+        if self.running_first:
+            self.running_button.set_tooltip_text(_("Sort apps by name"))
+            self.running_button.add_css_class("launcher-toggle-active")
+        else:
+            self.running_button.set_tooltip_text(_("Show running apps first"))
+            self.running_button.remove_css_class("launcher-toggle-active")
         # The button shows where it leads, like the eye.
         if self.mode == "plugins":
             self.mode_button.set_icon_name("view-app-grid-symbolic")
@@ -2761,6 +3562,15 @@ class Launcher(Gtk.Application):
             self.mode_button.set_icon_name("application-x-addon-symbolic")
             self.mode_button.set_tooltip_text(_("Show widgets & plugins (Tab)"))
         self.update_title()
+
+    def toggle_running_first(self, *_args):
+        self.running_first = not self.running_first
+        try:
+            set_running_first(self.running_first)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        self.update_hidden_button_state()
+        self.refresh_list()
 
     def toggle_hidden(self, *_args):
         self.show_hidden_by_mode[self.mode] = not self.show_hidden
@@ -2815,9 +3625,43 @@ class Launcher(Gtk.Application):
         return end
 
     def load_plugins(self):
-        plugins, items = [], []
+        self.tray_seen, self.plugins = self.collect_plugins()
+        self.plugins_at = time.monotonic()
+
+    def prefetch_plugins(self):
+        """Read the plugin page in the background (about 0.1 s of D-Bus and
+        omarchy-shell), so Tab shows it at once. A newer read wins."""
+        self.plugins_generation = getattr(self, "plugins_generation", 0) + 1
+        generation = self.plugins_generation
+
+        def work():
+            try:
+                result = self.collect_plugins()
+            except Exception as error:
+                print("Error reading plugins:", error, file=sys.stderr)
+                return
+            GLib.idle_add(apply, result)
+
+        def apply(result):
+            if generation != self.plugins_generation:
+                return GLib.SOURCE_REMOVE
+            self.tray_seen, self.plugins = result
+            self.plugins_at = time.monotonic()
+            # Already on the plugin page: show the fresh list, unless a menu
+            # or a sub-page is open (rebuilding rows would close it).
+            if (self.mode == "plugins" and self.window.get_visible() and not self.actions_menu_open()
+                    and self.stack.get_visible_child_name() == "list"):
+                row = self.rows.get_selected_row()
+                self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
+
+    def collect_plugins(self):
+        """(tray registration snapshot, plugin page entries). No GTK here:
+        it also runs on the prefetch thread."""
+        plugins, items, seen = [], [], getattr(self, "tray_seen", None)
         try:
-            self.tray_seen = tray.registered()
+            seen = tray.registered()
         except Exception:
             pass
         try:
@@ -2836,14 +3680,19 @@ class Launcher(Gtk.Application):
                 item["app"] = app
                 item["icon"] = app.get("icon") or item["icon"]
         # Apps running in the bar tray first: they are what is open right now.
-        self.plugins = items + plugins
+        return seen, items + plugins
 
     def toggle_mode(self, *_args):
         if self.actions_menu_open():
             self.actions_popover.popdown()
         self.mode = "apps" if self.mode == "plugins" else "plugins"
         if self.mode == "plugins":
-            self.load_plugins()
+            # The background read from opening is fresh enough to show now;
+            # it is read again behind it. Without one, read it here.
+            if self.plugins and time.monotonic() - getattr(self, "plugins_at", 0) < 120:
+                self.prefetch_plugins()
+            else:
+                self.load_plugins()
         # The search stays: it filters the other list the same way.
         self.update_hidden_button_state()
         self.refresh_list(selected_id="")

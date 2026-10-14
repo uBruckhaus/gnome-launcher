@@ -1,4 +1,4 @@
-"""Launch & Bind - Theme colors from Omarchy."""
+"""App Manager - Theme colors from Omarchy."""
 
 from pathlib import Path
 import tomllib

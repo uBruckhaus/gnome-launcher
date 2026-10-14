@@ -122,7 +122,7 @@ class AdminCommandTests(unittest.TestCase):
             entry("app", pwa=True),
             {"name": "Widget", "plugin_id": "x.y", "exec": "omarchy-shell shell toggle x.y"},
             {"name": "Tray", "tray_id": "1", "exec": ""},
-            {"name": "Launch & Bind", "self_launcher": True, "exec": "launcher-toggle"},
+            {"name": "App Manager", "self_launcher": True, "exec": "launcher-toggle"},
         ]
         for app in refused:
             with self.subTest(exec=app.get("exec")):

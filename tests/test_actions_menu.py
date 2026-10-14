@@ -1,5 +1,6 @@
 """Menu lifetime checks without starting GTK or a desktop launcher."""
 import ast
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -16,7 +17,7 @@ class ActionsMenuTests(unittest.TestCase):
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.glib = SimpleNamespace(SOURCE_REMOVE=False, SOURCE_CONTINUE=True,
                                     idle_add=Mock(), timeout_add=Mock(return_value=123))
-        namespace = {"GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8)}
+        namespace = {"GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8), "time": time}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
         self.app = namespace["Launcher"]()
         self.menu = Mock()
