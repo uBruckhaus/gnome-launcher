@@ -36,6 +36,7 @@ else:
     os.environ.pop("LD_PRELOAD", None)
 
 import atexit
+import concurrent.futures
 import faulthandler
 import colorsys
 import copy
@@ -45,7 +46,7 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
-    saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown,
+    saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown, saved_corners, set_corners, read_bounded_output,
     saved_size, set_saved_size, saved_position, set_saved_position,
     plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
@@ -64,6 +65,7 @@ import tray
 import updates
 import newapps
 import icons
+import corners
 import dock_core
 import previews
 import tempfile
@@ -141,6 +143,16 @@ def folder_fit(count, card_width, height):
     if best_icon < FOLDER_ICON:
         return folder_columns(card_width), FOLDER_ICON
     return best_columns, min(best_icon, FOLDER_ICON_MAX)
+
+
+def folder_icons_height(count, columns, icon, height):
+    """The height of a folder's icon area that fills the page's height: the
+    rows spread out when the width limits the icons. Never less than the
+    three rows themselves (then the page scrolls)."""
+    rows_height = FOLDER_ROWS * (icon + 14) + (FOLDER_ROWS - 1) * 6
+    rows = -(-max(count, 1) // max(columns, 1))
+    tile_h = (height - (rows - 1) * TILE_SPACING) / rows
+    return max(rows_height, int(tile_h - (folder_tile_size(icon)[1] - rows_height)))
 
 # Where each browser lists its installed web apps.
 APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
@@ -247,12 +259,9 @@ atexit.register(cleanup_pid)
 
 
 def hyprland_rounding():
-    try:
-        result = subprocess.run(["hyprctl", "getoption", "decoration:rounding", "-j"],
-                                capture_output=True, text=True, timeout=2)
-        return max(0, min(int(json.loads(result.stdout).get("int", 0)), 24))
-    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
-        return 0
+    """The windows' rounding (theme or looknfeel.lua), or None if unknown."""
+    out = read_bounded_output(["hyprctl", "getoption", "decoration:rounding", "-j"], max_bytes=4096, timeout=2)
+    return corners.parse_rounding(out or "")
 
 
 # A key pressed alone this soon after a combo makes a two-step shortcut.
@@ -1085,7 +1094,9 @@ class Launcher(Gtk.Application):
         the size has settled, not on every step of a drag on the grip."""
         if not getattr(self, "folder_count", 0) or not self.showing_folders():
             return
-        if folder_fit(self.folder_count, self.card_w, self.list_h)[1] == getattr(self, "folder_icon", FOLDER_ICON):
+        columns, icon = folder_fit(self.folder_count, self.card_w, self.list_h)
+        if (icon == getattr(self, "folder_icon", FOLDER_ICON) and folder_icons_height(
+                self.folder_count, columns, icon, self.list_h) == getattr(self, "folder_icons_h", None)):
             return
         if getattr(self, "refit_source", None):
             GLib.source_remove(self.refit_source)
@@ -1218,7 +1229,8 @@ class Launcher(Gtk.Application):
                    if gid != "all" and (members or gid not in (groups.RUNNING, groups.OTHER))]
         # As many as there are fill the page: added or deleted groups refit.
         self.folder_count = len(folders)
-        self.folder_icon = folder_fit(self.folder_count, self.card_w, self.list_h)[1]
+        columns, self.folder_icon = folder_fit(self.folder_count, self.card_w, self.list_h)
+        self.folder_icons_h = folder_icons_height(self.folder_count, columns, self.folder_icon, self.list_h)
         self.apply_grid_columns()
         for gid, label, members in folders:
             tile = self.make_folder_tile(gid, label, members)
@@ -1246,6 +1258,43 @@ class Launcher(Gtk.Application):
         self.resize_to(self.card_w, self.list_h)
         if self.overview and before:
             self.refresh_list()
+
+    def corner_labels(self):
+        rounding = getattr(self, "window_rounding", None)
+        like = _("Like windows ({0} px)").format(rounding) if rounding is not None else _("Like windows")
+        return [like, _("Rounded"), _("Square")]
+
+    def corners_tip(self):
+        """Where the windows' rounding comes from: the theme, looknfeel.lua or Omarchy."""
+        source = corners.rounding_source()
+        if source == "user":
+            origin = _("Your windows' rounding is set in ~/.config/hypr/looknfeel.lua.")
+        elif source == "theme":
+            origin = _("Your windows' rounding is set by the current theme (its hyprland.lua).")
+        else:
+            origin = _("Your windows use Omarchy's default rounding (square); a theme or ~/.config/hypr/looknfeel.lua can change it.")
+        return _("Corners of the popup, its folders and cards, and the dock. “Like windows” follows Hyprland's window rounding.") + " " + origin
+
+    def set_corners(self, value):
+        try:
+            set_corners(value)  # The dock follows through settings.json.
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        self.apply_theme()
+
+    def sync_corners_control(self):
+        """The window rounding may have changed (a theme or looknfeel.lua):
+        show its new value and source."""
+        dropdown = getattr(self, "corners_dropdown", None)
+        if dropdown is None:
+            return
+        self.corners_syncing = True
+        dropdown.set_model(Gtk.StringList.new(self.corner_labels()))
+        dropdown.set_selected(self.corner_choices.index(saved_corners()))
+        self.corners_syncing = False
+        tip = self.corners_tip()
+        dropdown.set_tooltip_text(tip)
+        self.corners_label.set_tooltip_text(tip)
 
     def sync_layout_controls(self):
         for layout, button in getattr(self, "layout_buttons", {}).items():
@@ -1282,7 +1331,9 @@ class Launcher(Gtk.Application):
         # than nine scroll inside the folder.
         icons = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True, row_homogeneous=True)
         icons.set_halign(Gtk.Align.FILL)
-        icons.set_valign(Gtk.Align.START)
+        overflow = len(members) > FOLDER_COLUMNS * FOLDER_ROWS
+        # Rows spread over the folder's height, unless they scroll.
+        icons.set_valign(Gtk.Align.START if overflow else Gtk.Align.FILL)
         icon_marker = self.drop_marker()
         icon_size = getattr(self, "folder_icon", FOLDER_ICON)
         cell_size = icon_size + 14
@@ -1328,6 +1379,7 @@ class Launcher(Gtk.Application):
                     slot.add_overlay(mark)
                 button.set_child(slot)
                 button.set_size_request(cell_size, cell_size)
+                button.set_valign(Gtk.Align.CENTER)
                 tip = app["name"]
                 if hidden or off_bar:
                     tip += " (" + (_("Hidden") if hidden else _("Not in bar")) + ")"
@@ -1353,17 +1405,19 @@ class Launcher(Gtk.Application):
             icons.attach(cell, index % FOLDER_COLUMNS, index // FOLDER_COLUMNS, 1, 1)
         scroller = Gtk.ScrolledWindow()
         scroller.add_css_class("launcher-folder-scroller")
-        height = FOLDER_ROWS * cell_size + (FOLDER_ROWS - 1) * 6
+        height = max(FOLDER_ROWS * cell_size + (FOLDER_ROWS - 1) * 6, getattr(self, "folder_icons_h", 0))
         scroller.set_min_content_height(height)
         scroller.set_max_content_height(height)
         # Only a folder with more than nine scrolls; the others let the
         # wheel scroll the page.
-        overflow = len(members) > FOLDER_COLUMNS * FOLDER_ROWS
         scroller.set_policy(Gtk.PolicyType.NEVER,
                             Gtk.PolicyType.AUTOMATIC if overflow else Gtk.PolicyType.NEVER)
         icons_layer = Gtk.Overlay()  # The drop marker for reordering icons.
         icons_layer.set_child(icons)
         icons_layer.add_overlay(icon_marker)
+        if not overflow:
+            # A scroller that never scrolls takes its child's height: ask there.
+            icons_layer.set_size_request(-1, height)
         scroller.set_child(icons_layer)
         frame = Gtk.Box()
         frame.add_css_class("launcher-folder-icons")
@@ -1375,6 +1429,12 @@ class Launcher(Gtk.Application):
         name.set_ellipsize(3)
         name.set_max_width_chars(1)
         name.set_hexpand(True)
+        if self.new_group_star(gid) is not None:
+            # In the label itself, so a long name still ellipsizes, centred.
+            yellow = self.theme.colors.get("yellow", "#e5c07b")
+            name.set_markup(f'<span foreground="{GLib.markup_escape_text(yellow)}">★</span> '
+                            + GLib.markup_escape_text(label))
+            name.set_tooltip_text(_("New group: drag apps onto it to fill it."))
         box.append(name)
         tile.set_child(box)
         tile.actions_button = frame
@@ -1441,6 +1501,9 @@ class Launcher(Gtk.Application):
                 dot.add_css_class("launcher-filter-dot")
                 dot.set_valign(Gtk.Align.CENTER)
                 box.append(dot)
+            star = self.new_group_star(gid)
+            if star is not None:
+                box.append(star)
             box.append(Gtk.Label(label=label))
             count = Gtk.Label(label=str(len(members)))
             count.add_css_class("launcher-filter-count")
@@ -1909,8 +1972,13 @@ class Launcher(Gtk.Application):
             except Exception:
                 return 0.5
 
-        # Follow Hyprland's window rounding like the Omarchy shell does.
-        radius = hyprland_rounding()
+        # Corners: Hyprland's window rounding like the Omarchy shell (the
+        # default), or rounded / square whatever the windows do.
+        self.window_rounding = hyprland_rounding()
+        radius = corners.radius(saved_corners(), self.window_rounding)
+        # For the settings previews (drawn every frame: no file reads there).
+        self.corner_radius = radius
+        self.dock_corner_radius = radius or corners.ROUNDED
         sel_hex = colors.get("selection", "#45475a")
         bg_hex = colors.get("background", "#1e1e2e")
         fg_hex = colors.get("foreground", "#cdd6f4")
@@ -3089,6 +3157,9 @@ class Launcher(Gtk.Application):
         line.append(chevron)
         title = Gtk.Label(label=groups.display_name(gid, self.groups, self.mode), xalign=0)
         title.add_css_class("launcher-group-title")
+        star = self.new_group_star(gid)
+        if star is not None:
+            line.append(star)
         line.append(title)
         number = Gtk.Label(label=str(count))
         number.add_css_class("launcher-group-count")
@@ -4147,9 +4218,23 @@ class Launcher(Gtk.Application):
         grid.attach(label(_("View buttons when small"), views_tip), 0, 4, 1, 1)
         grid.attach(views_switch, 1, 4, 1, 1)
         self.views_switch = views_switch
+        self.corner_choices = corners.CHOICES
+        corners_dropdown = Gtk.DropDown.new_from_strings(self.corner_labels())
+        corners_dropdown.add_css_class("launcher-compact-dropdown")
+        corners_dropdown.set_halign(Gtk.Align.START)
+        corners_dropdown.set_valign(Gtk.Align.CENTER)
+        corners_dropdown.set_tooltip_text(self.corners_tip())
+        corners_dropdown.set_selected(self.corner_choices.index(saved_corners()))
+        corners_dropdown.connect("notify::selected", lambda d, _p: getattr(self, "corners_syncing", False)
+                                 or self.set_corners(self.corner_choices[d.get_selected()]))
+        self.corners_label = label(_("Corners"), self.corners_tip())
+        grid.attach(self.corners_label, 0, 5, 1, 1)
+        grid.attach(corners_dropdown, 1, 5, 1, 1)
+        self.corners_dropdown = corners_dropdown
         # What Layout and View buttons do, animated.
         layout_sketch = previews.LayoutSketch(lambda: self.theme.colors,
-                                              lambda: (self.wide_layout, self.view_buttons_on))
+                                              lambda: (self.wide_layout, self.view_buttons_on,
+                                                       getattr(self, "corner_radius", 0)))
         layout_sketch.set_tooltip_text(_("Preview: the small list, then resized wide."))
         dock_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
         self.build_dock_settings(dock_grid, label, 0)
@@ -4265,7 +4350,9 @@ class Launcher(Gtk.Application):
                    row + 6),
         ]
         # What the dock options do, animated, right beneath its options.
-        sketch = previews.DockSketch(lambda: self.theme.colors, lambda: self.dock_cache, lambda: self.bar_cache)
+        sketch = previews.DockSketch(lambda: self.theme.colors, lambda: self.dock_cache, lambda: self.bar_cache,
+                                     lambda: (getattr(self, "window_rounding", None) or 0,
+                                              getattr(self, "dock_corner_radius", corners.ROUNDED)))
         sketch.set_tooltip_text(_("Preview: the dock as set, with the bar and two windows."))
         self.dock_sketch = sketch
         self.sync_dock_settings()
@@ -4313,12 +4400,13 @@ class Launcher(Gtk.Application):
 
     def reset_general_settings(self):
         """Language: the system's; Open as administrator: off; layouts:
-        folders when wide, the list when small. A new language restarts the
-        popup (on this page), so it comes last."""
+        folders when wide, the list when small; corners like the windows. A
+        new language restarts the popup (on this page), so it comes last."""
         if self.admin_switch.get_active():
             self.admin_switch.set_active(False)  # Its handler switches the action off properly.
         self.set_wide_layout("folders")
         self.toggle_view("list")
+        self.corners_dropdown.set_selected(0)  # "Like windows": saves and redraws.
         if i18n.language_setting() != "auto":
             self.language_dropdown.set_selected(0)  # "System (…)": saves and restarts.
 
@@ -4552,6 +4640,7 @@ class Launcher(Gtk.Application):
         self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
         self.hide_main_header()
         self.set_admin_switch(admin_action_enabled())  # Off again in a new session.
+        self.sync_corners_control()  # The windows' rounding may have changed.
         self.stack.set_visible_child_name("settings")
         self.update_title()
         self.language_dropdown.grab_focus()
@@ -4744,6 +4833,16 @@ class Launcher(Gtk.Application):
                                     else _("Name of the new group for {0}").format(app["name"]))
         self.open_aux_page("groupname", _("Rename group") if gid else _("New group"), backspace_goes_back=False)
         self.group_entry.grab_focus()
+        # Again once the page has slid in: a closing menu hands the focus back
+        # to its button, and the page cannot take it while it slides.
+        GLib.timeout_add(self.stack.get_transition_duration() + 40, self.focus_group_entry)
+
+    def focus_group_entry(self):
+        if self.window is not None and self.stack.get_visible_child_name() == "groupname" \
+                and not self.group_entry.get_delegate().has_focus():
+            self.group_entry.grab_focus()
+            self.group_entry.set_position(-1)
+        return GLib.SOURCE_REMOVE
 
     def save_group_name(self):
         gid, app = self.group_name_target or (None, None)
@@ -4763,7 +4862,9 @@ class Launcher(Gtk.Application):
         # Show where it went: the overview filtered to the group, or the
         # group view, on the group or the moved entry.
         if getattr(self, "overview", False):
-            self.overview_filter[self.mode] = gid
+            # A new empty group: stay on All (its folder or chip has a star
+            # until something is put in it). One made for an entry shows it.
+            self.overview_filter[self.mode] = gid if app is not None else "all"
         elif self.view != "groups":
             self.view = "groups"
             try:
@@ -4925,38 +5026,73 @@ class Launcher(Gtk.Application):
         self.icon_status.set_label(_("Searching…"))
         color = self.theme.colors.get("foreground")
 
+        state = {"shown": 0, "left": None}
+
         def work():
             try:
-                found = icons.find_online(query, command, color)
+                todo = icons.candidates(query, command)
             except Exception as error:
                 print("Icon search failed:", error, file=sys.stderr)
-                found = []
-            GLib.idle_add(show, found)
+                todo = []
+            GLib.idle_add(begin, len(todo))
+            # A few downloads at a time; each icon shows as soon as it is here.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                futures = [pool.submit(icons.download, c, color) for c in todo]
+                for index, future in enumerate(futures):
+                    try:
+                        result = future.result()
+                    except Exception:
+                        result = None
+                    if token != self.icon_search_token:
+                        for rest in futures:
+                            rest.cancel()
+                        return
+                    GLib.idle_add(show, index, result)
 
-        def show(found):
-            if token != self.icon_search_token or self.stack.get_visible_child_name() != "icon":
+        def begin(count):
+            if token != self.icon_search_token:
                 return GLib.SOURCE_REMOVE
+            state["left"] = count
             if self.icon_tmp is None:
                 self.icon_tmp = Path(tempfile.mkdtemp(prefix="app-manager-icons-"))
                 atexit.register(shutil.rmtree, self.icon_tmp, True)
             for old in self.icon_tmp.iterdir():  # Candidates of earlier searches.
                 old.unlink(missing_ok=True)
-            shown = 0
-            for index, (collection, slug, data, extension) in enumerate(found):
+            if not count:
+                finish()
+            return GLib.SOURCE_REMOVE
+
+        def show(index, result):
+            if token != self.icon_search_token or self.stack.get_visible_child_name() != "icon":
+                return GLib.SOURCE_REMOVE
+            state["left"] -= 1
+            if result is not None:
+                collection, slug, data, extension = result
                 path = self.icon_tmp / f"{token}-{index}{extension}"
                 try:
                     path.write_bytes(data)
+                    texture = icon_texture(str(path))  # The same checks as every icon file.
                 except OSError:
-                    continue
-                texture = icon_texture(str(path))  # The same checks as every icon file.
-                if texture is None:
-                    continue
-                self.icon_flows["online"].append(self.icon_tile(
-                    Gtk.Image.new_from_paintable(texture), f"{slug} · {collection}", (data, extension)))
-                shown += 1
-            self.icon_status.set_label(_("Nothing found. Try another name, e.g. the company.")
-                                       if not shown and not names else _("Click an icon to use it."))
+                    texture = None
+                if texture is not None:
+                    tile = self.icon_tile(Gtk.Image.new_from_paintable(texture), f"{slug} · {collection}",
+                                          (data, extension))
+                    tile.rank = index
+                    # Best matches first, whatever order they arrive in.
+                    flow = self.icon_flows["online"]
+                    position = 0
+                    while (child := flow.get_child_at_index(position)) is not None \
+                            and getattr(child.get_child(), "rank", -1) < index:
+                        position += 1
+                    flow.insert(tile, position)
+                    state["shown"] += 1
+            if state["left"] <= 0:
+                finish()
             return GLib.SOURCE_REMOVE
+
+        def finish():
+            self.icon_status.set_label(_("Nothing found. Try another name, e.g. the company.")
+                                       if not state["shown"] and not names else _("Click an icon to use it."))
         threading.Thread(target=work, daemon=True).start()
 
     def choose_icon(self, choice):
@@ -5984,6 +6120,16 @@ class Launcher(Gtk.Application):
 
     def is_new(self, app):
         return bool(app.get("desktop_id")) and "tray_id" not in app and newapps.is_new(self.seen, app["desktop_id"])
+
+    def new_group_star(self, gid):
+        """A group just made: a star until its first entry is put in it."""
+        if not groups.is_new(self.groups, gid):
+            return None
+        star = Gtk.Label(label="★")
+        star.add_css_class("launcher-new-star-inline")
+        star.set_valign(Gtk.Align.CENTER)
+        star.set_tooltip_text(_("New group: drag apps onto it to fill it."))
+        return star
 
     @staticmethod
     def new_star():

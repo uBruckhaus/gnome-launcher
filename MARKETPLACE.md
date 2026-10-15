@@ -8,7 +8,7 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 
 - **Plugin ID**: `ubruckhaus.simple-launcher-for-fools`
 - **Display Name**: `App Manager`
-- **Version**: `2.0.1`
+- **Version**: `2.1.0`
 - **Author**: `Uwe Bruckhaus`
 - **Category**: `Desktop`
 - **Tags**: `launcher`, `bar`, `quickshell`
@@ -29,6 +29,8 @@ This document contains the ready-to-use copy, metadata, and feature breakdown fo
 **App Manager** brings a lightning-fast, distraction-free application launcher to your Omarchy desktop. Designed to fit naturally into the Omarchy aesthetic, it pairs a native Quickshell status-bar widget with a high-performance GTK4 Layer-Shell overlay.
 
 Whether summoned with a click on the status bar or via a global Hyprland keybinding, the launcher appears instantly above all tiled and floating windows. Start typing immediately to filter your tools, jump straight to running applications, or manage distracting helper utilities with built-in app concealment.
+
+**New in 2.1 — folders that fill the popup, a Corners setting (like windows, rounded or square), a ★ on new groups and a much better icon search across three collections.**
 
 **New in 2.0 — a dock, folders, drag & drop, update and new-app marks.** An optional **dock** on any free screen edge (never the bar's): pinned apps, then running ones, with auto-hide, grow on hover, bounce on alerts, line or dot indicators in your colours, full length or compact, and pinning by dragging apps from App Manager onto it. The wide popup shows your groups as **folders** like a start menu (or cards), every drag shows a **drop bar** where it lands, and groups, folders and icons can be reordered. **Update** marks for apps and plugins (plugins update in one click, apps through Omarchy's update), a **★** on newly installed apps and CLI agents, **Change icon…** with original icons, and a settings page with animated previews and **Reset to defaults**.
 

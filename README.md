@@ -30,9 +30,15 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 
-## Changes in 2.0.1
+## Changes in 2.1.0
 
-**Folders fill the popup.** Resize the wide popup and the group folders grow or shrink with it: App Manager picks the number of folders per row that gives the largest icons (36–96 px) and fits again when you add or delete a group. With more groups than fit at the smallest size, the page scrolls as before.
+**Folders fill the popup.** Resize the wide popup and the group folders grow or shrink with it: App Manager picks the number of folders per row that gives the largest icons (36–96 px), spreads the icon rows over the height, and fits again when you add or delete a group. With more groups than fit at the smallest size, the page scrolls as before.
+
+**Corners.** A new setting for the popup, its folders and cards, and the dock: **Like windows** (the default) follows Hyprland's window rounding — set by the current theme's `hyprland.lua` or your `~/.config/hypr/looknfeel.lua`; the tooltip says which — or **Rounded** (12 px) or **Square**. The animated previews in the settings show it. The dock's *Rounded corners* uses the same radius (12 px when the popup is square).
+
+**New groups.** After **+ New group** the popup stays on *All*; the new group's folder, chip and heading carry a ★ until its first entry is put in it. The name field has the keyboard focus.
+
+**Better icon search.** **Change icon…** searches the name lists of three open icon collections (Dashboard Icons, selfh.st icons, Simple Icons — about 9,900 icons) by name, alias and word instead of guessing file names; up to 24 matches, best first, each shown as soon as it has downloaded. When the CDN lacks one format of an icon, the other (SVG or PNG) is tried.
 
 ## Changes in 2.0.0
 
@@ -62,7 +68,7 @@ The dock is its own small process (`dock.py`), started by the bar widget when th
 
 **CLI agents.** Coding agents installed with mise through Omarchy (Codex, Cursor Agent, Copilot, OpenCode, pi, …) appear as apps that open in a terminal — only when really installed (Omarchy writes a wrapper for every agent it offers).
 
-**Change icon…** in an app's menu: original icons from two open icon collections on cdn.jsdelivr.net (Dashboard Icons, Simple Icons) or your installed icon themes; *Reset to default* goes back. Stored in `~/.config/applauncher/icons.json` and `~/.local/share/applauncher/icons/`.
+**Change icon…** in an app's menu: original icons from three open icon collections on cdn.jsdelivr.net (Dashboard Icons, selfh.st icons, Simple Icons), searched by name, alias and word (up to 24 matches, best first, shown as they arrive), or your installed icon themes; *Reset to default* goes back. Stored in `~/.config/applauncher/icons.json` and `~/.local/share/applauncher/icons/`.
 
 **Settings** are grouped in cards with **Reset to defaults**; in the wide popup each card has an **animated preview** of what its options do. Option names are larger and easier to read.
 
@@ -74,7 +80,7 @@ App Manager sends nothing about you anywhere. It uses the network only for these
 
 - **Plugin updates:** `git fetch origin HEAD` in the git checkouts under `~/.config/omarchy/plugins` (the same as `omarchy plugin update`), at most every 30 minutes while App Manager is used.
 - **Package updates:** `checkupdates` (a private copy of the package database) and `yay -Qua` for AUR packages, at most every 30 minutes.
-- **Change icon…:** only when you search, `curl --proto =https --max-redirs 0` to `cdn.jsdelivr.net` for icon files (at most 1 MiB, checked like every other icon before it is shown).
+- **Change icon…:** only when you search, `curl --proto =https --max-redirs 0` to `cdn.jsdelivr.net`: the three collections' name lists (at most 4 MiB each, cached in `~/.cache/applauncher/icon-index/` and fetched again after a week) and icon files (at most 1 MiB, checked like every other icon before it is shown).
 
 ## Changes in 1.9.2
 
@@ -188,6 +194,7 @@ Open the settings page with the **gear (⚙)** at the top right of the popup; **
 | Layout when small | List, groups or by origin | List |
 | Layout when wide | Folders or cards (two columns or more) | Folders |
 | View buttons when small | The list / groups / origin buttons in the small popup's header (`Ctrl+G` works anyway) | Off |
+| Corners | Like windows (Hyprland's window rounding, from the theme or `looknfeel.lua`), Rounded or Square: the popup, folders, cards and dock | Like windows |
 | Dock | See *Changes in 2.0.0* | Off |
 
 **Reset to defaults** in each card sets its options back. They are stored in `~/.config/applauncher/settings.json` (mode `0600`, written atomically through an exclusive temp file), next to the default shortcut modifiers.

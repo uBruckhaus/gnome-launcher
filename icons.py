@@ -1,16 +1,20 @@
 """Icons chosen by hand for entries without a good one (CLI agents, …).
 
 icons.json maps a desktop id to a theme icon name, or to a file App Manager
-saved in ICON_DIR. Online candidates come from two open icon collections on
-cdn.jsdelivr.net, fetched with curl (https only, no redirects, one deadline,
-a size cap) through the bounded reader; the
-popup decodes them only through the same checks as every other icon file
-(launcher_core.icon_bytes). No GTK here: the downloads run on a thread."""
+saved in ICON_DIR. Online candidates come from three open icon collections on
+cdn.jsdelivr.net (Dashboard Icons, selfh.st icons, Simple Icons). Their name
+lists (with aliases) are downloaded at most once a week into INDEX_DIR and
+searched by name, alias and word; the icons themselves are fetched with curl
+(https only, no redirects, one deadline, a size cap) through the bounded
+reader, and the popup decodes them only through the same checks as every
+other icon file (launcher_core.icon_bytes). No GTK here: the downloads run
+on threads."""
 import hashlib
 import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 from launcher_core import read_bounded_output
@@ -22,6 +26,19 @@ MAX_DOWNLOAD_BYTES = 1024 * 1024
 MAX_OVERRIDES = 2000
 TIMEOUT = 8
 HOST = "cdn.jsdelivr.net"
+INDEX_DIR = Path.home() / ".cache/applauncher/icon-index"
+MAX_INDEX_BYTES = 4 * 1024 * 1024
+INDEX_TIMEOUT = 20
+INDEX_MAX_AGE = 7 * 24 * 3600
+MAX_RESULTS = 24
+# The collections' name lists: (file in INDEX_DIR, url).
+INDEXES = {
+    "dashboard": f"https://{HOST}/gh/homarr-labs/dashboard-icons/metadata.json",
+    "selfhst": f"https://{HOST}/gh/selfhst/icons/index.json",
+    "simple": f"https://{HOST}/npm/simple-icons@latest/data/simple-icons.json",
+}
+COLLECTION_NAMES = {"dashboard": "Dashboard Icons", "selfhst": "selfh.st", "simple": "Simple Icons"}
+_INDEX_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,79}$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9._+-]{1,128}$")
 _SLUG_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 
@@ -33,6 +50,7 @@ ALIASES = {
     "gemini": ["google-gemini", "gemini"], "gemini cli": ["google-gemini"],
     "opencode": ["opencode"], "grok": ["grok", "x"], "crush": ["charm", "crush"],
     "lm studio": ["lm-studio", "lmstudio"], "pi": ["pi"], "oh my pi": ["pi"],
+    "vs code": ["visual-studio-code", "vscode"], "code": ["visual-studio-code", "vscode"],
 }
 
 
@@ -68,7 +86,7 @@ def looks_like(data, kind):
     return head.startswith(b"<svg") or (head.startswith(b"<?xml") and b"<svg" in data[:4096].lower())
 
 
-_URL_RE = re.compile(r"^https://cdn\.jsdelivr\.net/[A-Za-z0-9@._/-]{1,200}\.(?:svg|png)$")
+_URL_RE = re.compile(r"^https://cdn\.jsdelivr\.net/[A-Za-z0-9@._/-]{1,200}\.(?:svg|png|json)$")
 
 
 def curl_command(url):
@@ -96,6 +114,183 @@ def tint(svg, color):
     if not re.match(r"^#[0-9a-fA-F]{6}$", color or ""):
         return svg
     return re.sub(rb"<svg\b", b'<svg fill="' + color.encode() + b'"', svg, count=1)
+
+
+def fold(text):
+    """Lower case, every run of other characters one space."""
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", str(text or "").casefold()).split())
+
+
+def index_entries(key, data):
+    """[(collection, slug, url, kind, names)] from one collection's name list;
+    anything malformed is skipped."""
+    out = []
+    if key == "dashboard" and isinstance(data, dict):
+        for slug, meta in list(data.items())[:20000]:
+            if not isinstance(slug, str) or not _INDEX_SLUG_RE.match(slug) or not isinstance(meta, dict):
+                continue
+            kind = "png" if meta.get("base") == "png" else "svg"
+            aliases = meta.get("aliases") if isinstance(meta.get("aliases"), list) else []
+            url = f"https://{HOST}/gh/homarr-labs/dashboard-icons/{kind}/{slug}.{kind}"
+            out.append(("dashboard", slug, url, kind, [slug] + [a for a in aliases[:20] if isinstance(a, str)]))
+    elif key == "selfhst" and isinstance(data, list):
+        for item in data[:20000]:
+            if not isinstance(item, dict):
+                continue
+            slug, name = item.get("Reference"), item.get("Name")
+            if not isinstance(slug, str) or not _INDEX_SLUG_RE.match(slug):
+                continue
+            kind = "svg" if item.get("SVG") == "Yes" else "png" if item.get("PNG") == "Yes" else None
+            if kind is None:
+                continue
+            tags = item.get("Tags") if isinstance(item.get("Tags"), str) else ""
+            names = [slug] + ([name] if isinstance(name, str) else []) + [t for t in tags.split(",")[:20] if t.strip()]
+            out.append(("selfhst", slug, f"https://{HOST}/gh/selfhst/icons/{kind}/{slug}.{kind}", kind, names))
+    elif key == "simple" and isinstance(data, list):
+        for item in data[:20000]:
+            if not isinstance(item, dict):
+                continue
+            slug, title = item.get("slug"), item.get("title")
+            if not isinstance(slug, str) or not _INDEX_SLUG_RE.match(slug) or "." in slug:
+                continue
+            aka = (item.get("aliases") or {}).get("aka") if isinstance(item.get("aliases"), dict) else None
+            names = [slug] + ([title] if isinstance(title, str) else []) + \
+                [a for a in (aka if isinstance(aka, list) else [])[:20] if isinstance(a, str)]
+            out.append(("simple", slug, f"https://{HOST}/npm/simple-icons@latest/icons/{slug}.svg", "mono", names))
+    return out
+
+
+def _read_cache(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(MAX_INDEX_BYTES + 1)
+    except OSError:
+        return None
+    return data if len(data) <= MAX_INDEX_BYTES else None
+
+
+def load_index(key, run=read_bounded_output, now=None, directory=None):
+    """One collection's entries: the cached name list while it is younger
+    than a week, else downloaded again (the old copy when that fails)."""
+    directory = Path(directory or INDEX_DIR)
+    path = directory / f"{key}.json"
+    now = time.time() if now is None else now
+    raw = _read_cache(path)
+    try:
+        fresh = raw is not None and now - os.lstat(path).st_mtime < INDEX_MAX_AGE
+    except OSError:
+        fresh = False
+    if not fresh and shutil.which("curl"):
+        url = INDEXES[key]
+        command = curl_command(url)
+        command[command.index("--max-time") + 1] = str(INDEX_TIMEOUT)
+        command[command.index("--max-filesize") + 1] = str(MAX_INDEX_BYTES)
+        try:
+            data = run(command, max_bytes=MAX_INDEX_BYTES, timeout=INDEX_TIMEOUT + 2, binary=True)
+        except OSError:
+            data = None
+        if data and len(data) <= MAX_INDEX_BYTES:
+            try:
+                json.loads(data)
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                _write(path, data)
+                raw = data
+            except (ValueError, OSError):
+                pass
+    try:
+        return index_entries(key, json.loads(raw)) if raw else []
+    except ValueError:
+        return []
+
+
+def score(query, names):
+    """How well a typed query matches an icon's names; 0: not at all."""
+    q = fold(query)
+    if not q:
+        return 0
+    compact = q.replace(" ", "")
+    words = q.split()
+    best = 0
+    for name in names:
+        n = fold(name)
+        if not n:
+            continue
+        n_compact = n.replace(" ", "")
+        n_words = n.split()
+        if n == q or n_compact == compact:
+            best = max(best, 100)
+        elif n.startswith(q) or n_compact.startswith(compact):
+            best = max(best, 80 - min(20, len(n_compact) - len(compact)))
+        elif all(any(w2.startswith(w) for w2 in n_words) for w in words):
+            best = max(best, 60)
+        elif len(compact) >= 3 and compact in n_compact:
+            best = max(best, 40)
+        elif len(words) > 1 and any(w == w2 for w in words if len(w) >= 3 for w2 in n_words):
+            best = max(best, 20)
+    return best
+
+
+_ORDER = {"dashboard": 0, "selfhst": 1, "simple": 2}
+
+
+def search(query, command=None, entries=(), limit=MAX_RESULTS):
+    """The best matching icons: [(collection key, slug, url, kind)]. The
+    typed query counts most, the entry's command (and the aliases) less."""
+    terms = [(query, 1.0)] + [(a, 0.9) for a in ALIASES.get(fold(query), [])]
+    if command and fold(command) != fold(query):
+        terms += [(command, 0.7)] + [(a, 0.6) for a in ALIASES.get(fold(command), [])]
+    ranked = []
+    for collection, slug, url, kind, names in entries:
+        value = max(score(term, names) * weight for term, weight in terms)
+        if value > 0:
+            ranked.append((-value, _ORDER.get(collection, 9), len(slug), slug, collection, url, kind))
+    ranked.sort()
+    out, seen = [], set()
+    for _v, _o, _l, slug, collection, url, kind in ranked:
+        if (collection, slug) in seen:
+            continue
+        seen.add((collection, slug))
+        out.append((collection, slug, url, kind))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def candidates(query, command=None, run=read_bounded_output, directory=None):
+    """What to download for a query: index matches, else the old guesses
+    (when the name lists cannot be had)."""
+    entries = []
+    for key in INDEXES:
+        entries += load_index(key, run, directory=directory)
+    if entries:
+        return search(query, command, entries)
+    guesses = []
+    for slug in slugs_for(query, command):
+        for name, url, kind in sources(slug):
+            key = next(k for k, v in COLLECTION_NAMES.items() if v == name)
+            guesses.append((key, slug, url, kind))
+    return guesses
+
+
+def download(candidate, color=None, run=read_bounded_output):
+    """(collection name, slug, data, extension) for one candidate, or None."""
+    collection, slug, url, kind = candidate
+    data = fetch(url, kind, run)
+    if data is None and collection in ("dashboard", "selfhst") and kind in ("svg", "png"):
+        # The CDN lacks some files of these repositories: try the other format.
+        other = "png" if kind == "svg" else "svg"
+        url = url[: -len(f"{kind}/{slug}.{kind}")] + f"{other}/{slug}.{other}"
+        kind = other
+        data = fetch(url, kind, run)
+    if data is None:
+        return None
+    if kind == "mono":
+        data = tint(data, color)
+    return COLLECTION_NAMES.get(collection, collection), slug, data, ".png" if kind == "png" else ".svg"
 
 
 def find_online(query, command=None, color=None, run=read_bounded_output):

@@ -116,10 +116,11 @@ class Sketch(Gtk.DrawingArea):
 class DockSketch(Sketch):
     """A small screen with the bar, two windows and the dock as set."""
 
-    def __init__(self, colors, dock, bar):
+    def __init__(self, colors, dock, bar, radii=lambda: (0, 12)):
         super().__init__(150, colors)
-        self.dock = dock  # Callables returning the dock settings and the bar's edge.
+        self.dock = dock  # Callables returning the dock settings and the bar's edge,
         self.bar = bar
+        self.radii = radii  # and (the windows' rounding, the dock's rounding) in px.
         self.set_tooltip_text(None)
 
     def draw(self, _area, cr, width, height):
@@ -175,7 +176,7 @@ class DockSketch(Sketch):
                 windows[2] -= keep
             else:
                 windows[2] -= keep
-        self.draw_windows(cr, c, *windows)
+        self.draw_windows(cr, c, *windows, radius=self.radii()[0] * 0.35)
         cr.save()
         rounded(cr, sx, sy, sw, sh, 6)  # A hidden dock slides off the sketched screen.
         cr.clip()
@@ -183,12 +184,12 @@ class DockSketch(Sketch):
         cr.restore()
 
     @staticmethod
-    def draw_windows(cr, c, x, y, w, h):
+    def draw_windows(cr, c, x, y, w, h, radius=3):
         g = 3
         half = (w - 3 * g) / 2
         for i in range(2):
             wx = x + g + i * (half + g)
-            rounded(cr, wx, y + g, half, h - 2 * g, 3)
+            rounded(cr, wx, y + g, half, h - 2 * g, radius)
             cr.set_source_rgba(*rgba(c["foreground"], 0.09))
             cr.fill_preserve()
             cr.set_source_rgba(*rgba(c["foreground"], 0.22))
@@ -215,7 +216,7 @@ class DockSketch(Sketch):
         # Slide in from the edge.
         cr.translate(0, -(1 - shown) * (band + gap + 2))
         start = 0 if full else (length_room - band_len) / 2
-        radius = 0 if not s["dock_rounded"] else min(band / 2, 4 + 8 * k)
+        radius = 0 if not s["dock_rounded"] else min(band / 2, self.radii()[1] * k)
         if not s["dock_transparent"]:
             rounded(cr, start, gap, band_len, band, radius)
             cr.set_source_rgba(*rgba(c["background"], 0.92))
@@ -300,18 +301,20 @@ class LayoutSketch(Sketch):
 
     def __init__(self, colors, state):
         super().__init__(120, colors)
-        self.state = state  # A callable: (wide_layout, view_buttons_on).
+        self.state = state  # A callable: (wide_layout, view_buttons_on, corner radius in px).
 
     def draw(self, _area, cr, width, height):
         c = self.colors()
-        layout, view_buttons = self.state()
+        layout, view_buttons, radius = self.state()
+        # The sketch is about half size: the card's corners, then the folders' and cards'.
+        card_r, tile_r, dot_r = radius / 2, radius / 3, min(2, radius / 4)
         t = self.loop_time()
         grow = ease((t - 2.0) / 0.8) if t < 4.8 else 1.0 - ease((t - 5.2) / 0.6)
         small_w, wide_w = min(110.0, width * 0.32), width - 16
         card_w = small_w + (wide_w - small_w) * grow
         card_h = height - 12
         x, y = (width - card_w) / 2, 6
-        rounded(cr, x, y, card_w, card_h, 6)
+        rounded(cr, x, y, card_w, card_h, card_r)
         cr.set_source_rgba(*rgba(c["background"], 1))
         cr.fill_preserve()
         cr.set_source_rgba(*rgba(c["accent"], 0.9))
@@ -324,7 +327,7 @@ class LayoutSketch(Sketch):
         buttons = 3 if view_buttons and grow < 0.5 else 0
         for i in range(buttons + 1):
             bx = x + card_w - 12 - i * 9
-            rounded(cr, bx, y + 6, 7, 7, 2)
+            rounded(cr, bx, y + 6, 7, 7, dot_r)
             cr.set_source_rgba(*rgba(c["accent"] if i else c["foreground"], 0.7 if i else 0.5))
             cr.fill()
         top = y + 20
@@ -353,7 +356,7 @@ class LayoutSketch(Sketch):
                 for i in range(columns * 2):
                     tx = x + 8 + (i % columns) * (tile + 8)
                     ty = top + (i // columns) * (tile + 10)
-                    rounded(cr, tx, ty, tile, tile, 4)
+                    rounded(cr, tx, ty, tile, tile, tile_r)
                     cr.set_source_rgba(*rgba(c["foreground"], 0.08 * alpha))
                     cr.fill()
                     for j in range(9 - (i * 2) % 5):
@@ -369,7 +372,7 @@ class LayoutSketch(Sketch):
                 for i in range(columns * 2):
                     tx = x + 8 + (i % columns) * (tile_w + 6)
                     ty = top + (i // columns) * (tile_h + 6)
-                    rounded(cr, tx, ty, tile_w, tile_h, 4)
+                    rounded(cr, tx, ty, tile_w, tile_h, tile_r)
                     cr.set_source_rgba(*rgba(c["foreground"], 0.08 * alpha))
                     cr.fill()
                     rounded(cr, tx + 5, ty + 5, 11, 11, 3)

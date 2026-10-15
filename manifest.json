@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "ubruckhaus.simple-launcher-for-fools",
   "name": "App Manager",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "author": "Uwe Bruckhaus",
   "license": "MIT",
   "description": "Launch · Group · Bind · Inspect, now with a dock: all your apps and plugins in one theme-aware popup. Type to launch; pull it wide for folders or cards and drag apps between groups; pin apps to an optional dock (any free edge, auto-hide, grow on hover); see updates and newly installed apps at a glance and update plugins in one click; give any app a global shortcut on a key map that shows who owns every key; open App info. Eight languages.",

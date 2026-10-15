@@ -142,3 +142,32 @@ class GroupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NewGroupMarkTests(unittest.TestCase):
+    def test_new_until_the_first_entry_for_good(self):
+        data = groups.default_page("apps")
+        gid = groups.add_group(data, "Work")
+        self.assertTrue(groups.is_new(data, gid))
+        groups.assign(data, "a.desktop", gid)
+        self.assertFalse(groups.is_new(data, gid))
+        groups.assign(data, "a.desktop", groups.OTHER)  # Empty again: still not new.
+        self.assertFalse(groups.is_new(data, gid))
+
+    def test_mark_survives_save_and_load_and_rename(self):
+        data = groups.default_page("apps")
+        gid = groups.add_group(data, "Work")
+        groups.rename_group(data, gid, "Job")
+        self.assertTrue(groups.is_new(data, gid))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "groups.json"
+            groups.save({"apps": data, "plugins": groups.default_page("plugins")}, path)
+            loaded = groups.load(path)["apps"]
+        self.assertTrue(groups.is_new(loaded, gid))
+        self.assertFalse(groups.is_new(loaded, "office"))
+
+    def test_only_true_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "groups.json"
+            path.write_text(json.dumps({"apps": {"groups": [{"id": "g1", "name": "A", "new": "yes"}], "members": {}}}))
+            self.assertFalse(groups.is_new(groups.load(path)["apps"], "g1"))

@@ -19,6 +19,7 @@ import i18n
 from i18n import _, ngettext
 from shortcuts import uwsm_desktop_arg
 import cli_tools
+import corners
 
 # The interface language is stored next to the launcher's other files.
 i18n.SETTINGS_FILE = Path.home() / ".config/applauncher/settings.json"
@@ -224,6 +225,15 @@ def saved_wide_layout(path=None):
 
 def set_wide_layout(layout, path=None):
     _save_setting("wide_layout", "folders" if layout == "folders" else "cards", path)
+
+
+def saved_corners(path=None):
+    """"windows" (follow Hyprland's window rounding; the default), "rounded" or "square"."""
+    return corners.choice(_load_settings(path).get("corners"))
+
+
+def set_corners(value, path=None):
+    _save_setting("corners", corners.choice(value), path)
 
 
 def view_buttons_shown(path=None):

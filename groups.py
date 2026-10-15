@@ -116,7 +116,7 @@ def _clean_page(data, page):
         name = clean_name(name) if isinstance(name, str) else ""
         if not name and gid not in BUILTIN_NAMES:
             continue
-        groups.append({"id": gid, "name": name})
+        groups.append({"id": gid, "name": name, "new": True} if group.get("new") is True else {"id": gid, "name": name})
     members = {}
     raw_members = data.get("members")
     if isinstance(raw_members, dict):
@@ -206,6 +206,14 @@ def assign(data, desktop_id, gid):
     if len(data["members"]) >= MAX_MEMBERS and desktop_id not in data["members"]:
         raise ValueError("too many members")
     data["members"][desktop_id] = gid
+    for group in data["groups"]:
+        if group["id"] == gid:
+            group.pop("new", None)  # Its first entry: no longer new, for good.
+
+
+def is_new(data, gid):
+    """A group made with "New group" that has never had an entry."""
+    return any(g["id"] == gid and g.get("new") is True for g in data["groups"])
 
 
 def name_taken(data, name, except_id=None):
@@ -228,7 +236,7 @@ def add_group(data, name):
     while f"g{number}" in ids:
         number += 1
     gid = f"g{number}"
-    data["groups"].append({"id": gid, "name": name})
+    data["groups"].append({"id": gid, "name": name, "new": True})
     return gid
 
 

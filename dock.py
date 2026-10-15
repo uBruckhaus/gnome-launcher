@@ -41,7 +41,8 @@ from pathlib import Path
 import dock_core
 import icons
 from i18n import _
-from launcher_core import icon_bytes, launch_action, launch_app, parse_desktop_files
+import corners
+from launcher_core import icon_bytes, launch_action, launch_app, parse_desktop_files, read_bounded_output, saved_corners
 from palette import ThemePalette
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -57,13 +58,11 @@ MARKER = 4              # The drop marker's thickness.
 _texture_cache = {}
 
 
-def hyprland_rounding():
-    try:
-        out = subprocess.run(["hyprctl", "getoption", "decoration:rounding", "-j"],
-                             capture_output=True, text=True, timeout=2).stdout
-        return max(0, min(int(json.loads(out).get("int", 0)), 24))
-    except (OSError, ValueError, TypeError, AttributeError, subprocess.SubprocessError):
-        return 8
+def dock_radius():
+    """The dock's corners when "Rounded corners" is on: App Manager's Corners
+    setting (like the windows, rounded or square), never square."""
+    out = read_bounded_output(["hyprctl", "getoption", "decoration:rounding", "-j"], max_bytes=4096, timeout=2)
+    return corners.radius(saved_corners(), corners.parse_rounding(out or "")) or corners.ROUNDED
 
 
 def hyprctl_dispatch(command):
@@ -130,7 +129,8 @@ class Dock(Gtk.Application):
         self.urgent = set()       # Window addresses that asked for attention (bounce).
         self.events_source = 0
         self.theme = ThemePalette()
-        self.radius = hyprland_rounding()
+        self.radius = dock_radius()
+        self.corners = saved_corners()
         self.css = Gtk.CssProvider()
 
     # --- life cycle ------------------------------------------------------------
@@ -214,7 +214,11 @@ class Dock(Gtk.Application):
                        "dock_transparent", "dock_height", "dock_icon_size", "dock_spacing", "dock_magnify",
                        "dock_bounce",
                        "dock_indicator_shown", "dock_indicator", "dock_indicator_color")
-        if self.edge != before_edge or any(before[k] != self.settings[k] for k in layout_keys):
+        corners_before, self.corners = self.corners, saved_corners()
+        if corners_before != self.corners:
+            self.radius = dock_radius()
+        if (self.edge != before_edge or corners_before != self.corners
+                or any(before[k] != self.settings[k] for k in layout_keys)):
             self.apply_layout()
             self.apply_theme()
         self.refresh(force=True)
@@ -224,6 +228,7 @@ class Dock(Gtk.Application):
         """Newly installed apps and theme changes."""
         self.load_apps()
         if self.theme.reload():
+            self.radius = dock_radius()  # A theme can bring its own window rounding.
             self.apply_theme()
         self.refresh(force=True)
         return True

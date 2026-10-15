@@ -12,7 +12,7 @@ import launcher_core  # noqa: E402
 NAMES = {"CARD_WIDTH", "TILE_WIDTH", "TILE_MAX_WIDTH", "TILE_SPACING", "MAX_COLUMNS", "CARD_PADDING",
          "MAX_CARD_WIDTH", "grid_columns", "FOLDER_COLUMNS", "FOLDER_ROWS", "FOLDER_ICON",
          "FOLDER_ICON_MAX", "FOLDER_CELL", "FOLDER_NAME_HEIGHT", "FOLDER_TILE_WIDTH", "folder_columns",
-         "folder_tile_size", "folder_fit"}
+         "folder_tile_size", "folder_fit", "folder_icons_height"}
 
 
 def load():
@@ -49,6 +49,16 @@ class FolderFitTests(unittest.TestCase):
     def test_a_wide_page_puts_few_folders_in_one_row(self):
         ns = load()
         self.assertEqual(ns["folder_fit"](3, 1600, 400)[0], 3)
+
+    def test_rows_spread_to_fill_the_height(self):
+        ns = load()
+        columns, icon = ns["folder_fit"](10, 1800, 870)
+        rows_height = 3 * (icon + 14) + 12
+        area = ns["folder_icons_height"](10, columns, icon, 870)
+        self.assertGreater(area, rows_height)
+        tile = ns["folder_tile_size"](icon)[1] - rows_height + area
+        self.assertLessEqual(2 * tile + ns["TILE_SPACING"], 870)
+        self.assertEqual(ns["folder_icons_height"](40, 3, 36, 400), 3 * 50 + 12)
 
     def test_too_many_keep_the_smallest_size_and_scroll(self):
         ns = load()
