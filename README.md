@@ -4,6 +4,8 @@
 
 ![App Manager](preview.png)
 
+**New in 2.0:** an optional **dock**, **folders**, **drag & drop everywhere**, **update and new-app marks** and **your own icons**. Pin apps to a dock on any free screen edge (auto-hide, grow on hover, bounce on alerts, your colours); pull the popup wide for **group folders** like a start menu, drag apps between groups and into the dock, and reorder anything with a visible drop bar; see at a glance which apps and plugins have **updates** (update plugins in one click) and which are **newly installed** (★); give apps without a good icon an original one with **Change icon…**. Settings show an animated preview of every option and have **Reset to defaults**. Details below.
+
 **New in 1.9:** **cards and a group bar.** Pull the popup wide (corner grip) or double-click its header, and the list becomes **cards in columns** (up to six) with a **group bar** at the bottom: Apps | Plugins, **+ New group**, then All, Running and your groups. Click a group to show only it, **drag a card onto a group** to move it there (or onto + New group to start one), right-click a group for rename, move and delete. The popup **resizes**, **moves** (drag the header) and remembers both; **double-click the header** to maximize or go back to the default size.
 
 **New in 1.8:** Launch & Bind is now called **App Manager**, because it does much more than launch and bind: **your groups** (Office, Media, … or your own, apps and plugins each with theirs), **by origin** (your default apps, what came with Omarchy, what you added), **App info** (path, package, size, install date, website, copy and open buttons), **running apps first**, and a much faster list. Nothing else changes: the plugin ID, install path, settings and your shortcuts stay as they are.
@@ -27,6 +29,48 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **One-click rebinding**: taking over a key is an option, not an error. **Rebind** turns the old binding off while your shortcut exists; remove the shortcut and the original works again.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
+
+## Changes in 2.0.0
+
+**Dock (optional, off by default).** Settings → **Dock** → *Show dock*. A bar of app icons on a screen edge: the App Manager button, your **pinned apps** (drag to reorder, a bar shows where they land), then the **running apps** that are not pinned, as on macOS. Click starts an app or brings its window to the front (again: the next window), middle-click opens a new window, right-click gives Open / its own actions / Pin or Unpin / Close. Pin apps with **Pin to dock** in their App Manager menu or by **dragging them from App Manager onto the dock**.
+
+| Dock setting | Choices | Default |
+| --- | --- | --- |
+| Position | Bottom, Top, Left, Right — never the bar's edge; if the bar moves onto it, the dock takes the opposite edge | Bottom |
+| Auto-hide | Hidden until the pointer touches the edge; off: the dock keeps its space and windows tile next to it | Off |
+| Full length / Icons | Compact and centred, or the whole edge with the icons at its start, centre or end | Compact, centre |
+| Rounded corners / Transparent | Corners like the windows; no background, only the icons (double-click the dock's background to switch, as on the bar) | Off / Off |
+| Dock height / Icon size | 32–96 px / 24–96 px; icons larger than the dock stick out of it | 48 / 32 px |
+| Icon spacing | The gap between two icons, 0–16 px | 6 px |
+| Grow on hover | Off or 125–200 %: the icon under the pointer grows, its neighbours halfway | Off |
+| Bounce on alerts | An app that wants attention (Hyprland's *urgent*) bounces until you switch to it | Off |
+| Show indicator / Indicator / colour | Marks running apps with a line or a dot, in the theme's accent or a palette colour | On / Line / Theme |
+
+The dock is its own small process (`dock.py`), started by the bar widget when the shell loads; it quits by itself when switched off. While App Manager is open the dock stays visible and App Manager leaves exactly the dock's area free, so you can drag apps onto it; App Manager only closes on a click outside both. It reads Hyprland's event socket for windows opening, closing, focus and *urgent*.
+
+**Folders.** With **Layout when wide** = *Folders* (the default), the wide popup shows each group as a folder of icons, all the same size (3 × 3, more scroll inside). Click an icon to start it, the folder to open the group (Esc or Backspace goes back), right-click an icon for its full menu, the folder for rename / move / delete. A filter field sits above the folders. **Layout when small** picks the list, groups or by origin for the small popup.
+
+**Drag & drop everywhere.** Drag an app from a folder, a card or a list row onto another folder, a group chip or between two icons; drag a group chip or a folder to reorder the groups. A bright bar shows exactly where it will land (left half of the target: before it, right half: after). Your order is kept in `groups.json` and used in every view.
+
+**Updates.** Apps whose package has a newer version (repositories via `checkupdates`, AUR via `yay -Qua`) and plugins whose git checkout is behind its remote's default branch get an **Update** mark. Plugins: **Update** in their menu runs `omarchy plugin update <id> --yes` in the background (fast-forward only, validated, rolled back on failure) and tells you how it went. Apps: **Update system…** opens Omarchy's own update window, because a single package is never updated on its own on Arch. Checked in the background at most every 30 minutes.
+
+**Newly installed.** Apps and plugins installed in the last seven days get a small yellow **★** until you open them. App Manager remembers what it has seen in `~/.config/applauncher/seen.json`; the first start records what is already there, CLI agents are dated by their install.
+
+**CLI agents.** Coding agents installed with mise through Omarchy (Codex, Cursor Agent, Copilot, OpenCode, pi, …) appear as apps that open in a terminal — only when really installed (Omarchy writes a wrapper for every agent it offers).
+
+**Change icon…** in an app's menu: original icons from two open icon collections on cdn.jsdelivr.net (Dashboard Icons, Simple Icons) or your installed icon themes; *Reset to default* goes back. Stored in `~/.config/applauncher/icons.json` and `~/.local/share/applauncher/icons/`.
+
+**Settings** are grouped in cards with **Reset to defaults**; in the wide popup each card has an **animated preview** of what its options do. Option names are larger and easier to read.
+
+**Sturdier.** All calls to `hyprctl` run off the main loop; a watchdog ends App Manager or the dock if their main loop ever hangs for 20 s (it writes where to `~/.local/state/applauncher/hang.log` / `dock-hang.log`), so a hang can never block the desktop.
+
+## Privacy and network
+
+App Manager sends nothing about you anywhere. It uses the network only for these, each read with a size limit and a deadline:
+
+- **Plugin updates:** `git fetch origin HEAD` in the git checkouts under `~/.config/omarchy/plugins` (the same as `omarchy plugin update`), at most every 30 minutes while App Manager is used.
+- **Package updates:** `checkupdates` (a private copy of the package database) and `yay -Qua` for AUR packages, at most every 30 minutes.
+- **Change icon…:** only when you search, `curl --proto =https --max-redirs 0` to `cdn.jsdelivr.net` for icon files (at most 1 MiB, checked like every other icon before it is shown).
 
 ## Changes in 1.9.2
 
@@ -137,8 +181,12 @@ Open the settings page with the **gear (⚙)** at the top right of the popup; **
 | --- | --- | --- |
 | Language | **System (…)** or one of the eight languages. The popup restarts in the new language. | System |
 | Open as administrator | Adds **Open as administrator** to the actions menu of apps that can run as root (see below). | Off |
+| Layout when small | List, groups or by origin | List |
+| Layout when wide | Folders or cards (two columns or more) | Folders |
+| View buttons when small | The list / groups / origin buttons in the small popup's header (`Ctrl+G` works anyway) | Off |
+| Dock | See *Changes in 2.0.0* | Off |
 
-Both are stored in `~/.config/applauncher/settings.json` (mode `0600`, written atomically through an exclusive temp file), next to the default shortcut modifiers.
+**Reset to defaults** in each card sets its options back. They are stored in `~/.config/applauncher/settings.json` (mode `0600`, written atomically through an exclusive temp file), next to the default shortcut modifiers.
 
 ## Open as administrator (optional)
 

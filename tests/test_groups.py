@@ -72,6 +72,40 @@ class GroupTests(unittest.TestCase):
         self.assertEqual([gid for gid, _m in sections[1:3]], ["internet", "office"])
         self.assertEqual(sections[-1], (groups.OTHER, [entries[1]]))
 
+    def test_reorder_moves_a_group_to_the_target_place(self):
+        ids = lambda: [g["id"] for g in self.data["groups"]]
+        start = ids()
+        self.assertTrue(groups.reorder_group(self.data, start[0], start[2]))           # before
+        self.assertEqual(ids(), [start[1], start[0], start[2]] + start[3:])
+        self.assertTrue(groups.reorder_group(self.data, start[0], start[2], after=True))
+        self.assertEqual(ids(), [start[1], start[2], start[0]] + start[3:])
+        self.assertFalse(groups.reorder_group(self.data, start[0], start[2], after=True))  # already there
+        self.assertTrue(groups.reorder_group(self.data, start[0], start[1]))
+        self.assertEqual(ids(), start)
+        self.assertFalse(groups.reorder_group(self.data, start[0], start[0]))
+        self.assertFalse(groups.reorder_group(self.data, start[0], groups.OTHER))
+
+    def test_place_orders_entries_inside_their_group(self):
+        apps = [{"desktop_id": i, "name": i, "categories": ["AudioVideo"]} for i in ("a", "b", "c")]
+        media = lambda: [a["desktop_id"] for a in dict(groups.sections(apps, self.data))["media"]]
+        self.assertEqual(media(), ["a", "b", "c"])
+        groups.place(self.data, "c", "media", "a", media())
+        self.assertEqual(media(), ["c", "a", "b"])
+        groups.place(self.data, "c", "media", "b", media(), after=True)
+        self.assertEqual(media(), ["a", "b", "c"])
+        groups.place(self.data, "a", "office", None, [])
+        self.assertEqual(media(), ["b", "c"])
+        self.assertEqual(dict(groups.sections(apps, self.data))["office"][0]["desktop_id"], "a")
+
+    def test_hand_order_survives_saving_and_bad_entries_are_dropped(self):
+        groups.place(self.data, "x", "media", None, ["y"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "groups.json"
+            groups.save({"apps": self.data, "plugins": groups.default_page("plugins")}, path)
+            self.assertEqual(groups.load(path)["apps"]["order"], ["y", "x"])
+            path.write_text('{"apps": {"groups": [], "order": ["a", 5, "a", ""]}}')
+            self.assertEqual(groups.load(path)["apps"]["order"], ["a"])
+
     def test_hostile_file_is_cleaned_entry_by_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "groups.json"

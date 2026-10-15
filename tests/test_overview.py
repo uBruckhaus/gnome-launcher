@@ -51,6 +51,29 @@ class OverviewTests(unittest.TestCase):
             path.write_text('{"size": [true, 5]}')
             self.assertIsNone(launcher_core.saved_size("size", path))
 
+    def test_wide_layout_defaults_to_folders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            self.assertEqual(launcher_core.saved_wide_layout(path), "folders")
+            launcher_core.set_wide_layout("cards", path)
+            self.assertEqual(launcher_core.saved_wide_layout(path), "cards")
+            path.write_text('{"wide_layout": "tiles"}')
+            self.assertEqual(launcher_core.saved_wide_layout(path), "folders")
+
+    def test_small_layout_defaults_to_the_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            self.assertEqual(launcher_core.saved_view(path), "list")
+            launcher_core.set_view("groups", path)
+            self.assertEqual(launcher_core.saved_view(path), "groups")
+
+    def test_view_buttons_are_off_unless_switched_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "settings.json"
+            self.assertFalse(launcher_core.view_buttons_shown(path))
+            launcher_core.set_view_buttons_shown(True, path)
+            self.assertTrue(launcher_core.view_buttons_shown(path))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,6 +18,7 @@ import gi
 import i18n
 from i18n import _, ngettext
 from shortcuts import uwsm_desktop_arg
+import cli_tools
 
 # The interface language is stored next to the launcher's other files.
 i18n.SETTINGS_FILE = Path.home() / ".config/applauncher/settings.json"
@@ -40,9 +41,14 @@ def _load_settings(path=None):
 
 def _save_setting(key, value, path=None):
     """Set one key in settings.json (atomic, private), keeping the others."""
+    _save_settings({key: value}, path)
+
+
+def _save_settings(values, path=None):
+    """Set several keys in settings.json in one write (atomic, private)."""
     path = Path(path or SETTINGS_FILE)
     data = _load_settings(path)
-    data[key] = value
+    data.update(values)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -200,13 +206,34 @@ def set_running_first(enabled, path=None):
 
 
 def saved_view(path=None):
-    """The list as a plain list, or in groups (header toggle, Ctrl+G)."""
+    """The small popup's layout: "list" (the default), "groups" or "origin"
+    (settings, header buttons, Ctrl+G)."""
     view = _load_settings(path).get("view")
     return view if view in ("groups", "origin") else "list"
 
 
 def set_view(view, path=None):
     _save_setting("view", view if view in ("groups", "origin") else "list", path)
+
+
+def saved_wide_layout(path=None):
+    """The resized (overview) popup: "folders" (each group as a folder of
+    icons, like a start menu; the default) or "cards" (every entry as a card)."""
+    return "cards" if _load_settings(path).get("wide_layout") == "cards" else "folders"
+
+
+def set_wide_layout(layout, path=None):
+    _save_setting("wide_layout", "folders" if layout == "folders" else "cards", path)
+
+
+def view_buttons_shown(path=None):
+    """The list | groups | origin buttons in the small popup's header (a
+    setting, off by default: the plain list)."""
+    return _load_settings(path).get("view_buttons") is True
+
+
+def set_view_buttons_shown(shown, path=None):
+    _save_setting("view_buttons", bool(shown), path)
 
 
 def saved_size(key, path=None):
@@ -391,6 +418,14 @@ def parse_desktop_files():
                          "desktop_id": path.stem, "startup_class": values.get("StartupWMClass", "")})
 
     apps.extend(scan_standalone_appimages(seen_names))
+    # CLI agents installed with mise (Codex, Copilot, …) that no .desktop file opens.
+    known = set()
+    for app in apps:
+        try:
+            known.update(Path(arg).name for arg in shlex.split(app.get("exec", "")))
+        except ValueError:
+            pass
+    apps.extend(e for e in cli_tools.cli_entries(known) if e["name"].strip().casefold() not in seen_names)
     return sorted(apps, key=lambda app: app["name"].lower())
 
 
@@ -404,11 +439,11 @@ def get_appimage_directories():
     return [d for d in candidates if d.is_dir()]
 
 
-def read_bounded_output(command, max_bytes=64 * 1024, timeout=1, binary=False):
+def read_bounded_output(command, max_bytes=64 * 1024, timeout=1, binary=False, ok_codes=(0,), env=None):
     """Read optional archive metadata with a byte limit and a total deadline."""
     deadline = time.monotonic() + timeout
-    with subprocess.Popen(command, stdout=subprocess.PIPE,
-                          stderr=subprocess.DEVNULL) as process:
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL, env=env) as process:
         try:
             output = bytearray()
             with selectors.DefaultSelector() as selector:
@@ -425,7 +460,7 @@ def read_bounded_output(command, max_bytes=64 * 1024, timeout=1, binary=False):
                     if len(output) > max_bytes:
                         return None
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+            if remaining <= 0 or process.wait(timeout=remaining) not in ok_codes:
                 return None
             return bytes(output) if binary else output.decode("utf-8", errors="replace")
         except subprocess.TimeoutExpired:

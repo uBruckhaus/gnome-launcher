@@ -9,6 +9,11 @@ BarWidget {
   moduleName: "ubruckhaus.simple-launcher-for-fools"
 
   readonly property string togglePath: Qt.resolvedUrl("launcher-toggle").toString().replace(/^file:\/\//, "")
+  readonly property string dockPath: Qt.resolvedUrl("dock.py").toString().replace(/^file:\/\//, "")
+
+  // The optional dock (App Manager → Settings → Dock): it quits at once when switched off,
+  // and a second start only makes a running dock re-read its settings.
+  Component.onCompleted: Quickshell.execDetached(["/usr/bin/python3", root.dockPath])
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight

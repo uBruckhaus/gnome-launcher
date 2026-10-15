@@ -17,9 +17,13 @@ class ActionsMenuTests(unittest.TestCase):
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.glib = SimpleNamespace(SOURCE_REMOVE=False, SOURCE_CONTINUE=True,
                                     idle_add=Mock(), timeout_add=Mock(return_value=123))
-        namespace = {"GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8, KEY_Super_L=65515, KEY_Super_R=65516), "time": time}
+        # Threads run at once in these tests.
+        thread = lambda target, daemon=True: SimpleNamespace(start=target)
+        namespace = {"threading": SimpleNamespace(Thread=thread), "dock_core": Mock(),
+                     "GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8, KEY_Super_L=65515, KEY_Super_R=65516), "time": time}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
         self.app = namespace["Launcher"]()
+        self.namespace = namespace
         self.menu = Mock()
         self.menu.get_visible.return_value = True
         self.app.actions_popover = self.menu
@@ -28,6 +32,7 @@ class ActionsMenuTests(unittest.TestCase):
         self.app.window.get_visible.return_value = True
         self.app.window.is_active.return_value = False
         self.app.refresh_running = Mock(return_value=True)
+        self.app.refresh_running_async = Mock()  # The poll's scan runs on a thread.
         self.app.refresh_list = Mock()
         self.app.theme = Mock()
         self.app.theme.reload.return_value = False
@@ -39,12 +44,10 @@ class ActionsMenuTests(unittest.TestCase):
 
     def test_status_refresh_resumes_after_menu_closes(self):
         self.app.poll()
-        self.app.refresh_running.assert_not_called()
-        self.app.refresh_list.assert_not_called()
+        self.app.refresh_running_async.assert_not_called()
         self.menu.get_visible.return_value = False
         self.app.poll()
-        self.app.refresh_running.assert_called_once()
-        self.app.refresh_list.assert_called_once()
+        self.app.refresh_running_async.assert_called_once()
 
     def test_app_directory_changes_defer_while_menu_is_open(self):
         self.app.reload_apps()
@@ -56,6 +59,17 @@ class ActionsMenuTests(unittest.TestCase):
         self.app.hide_if_inactive()
         self.app.hide.assert_not_called()
         self.menu.get_visible.return_value = False
+        self.app.hide_if_inactive()
+        self.app.hide.assert_called_once()
+
+    def test_focus_lost_to_the_dock_keeps_launcher_open(self):
+        self.menu.get_visible.return_value = False
+        self.glib.idle_add.side_effect = lambda fn, *args: fn(*args)  # The decision, at once.
+        self.app.dock_screen_rect = (0, 900, 300, 80)
+        self.namespace["dock_core"].inside.return_value = True  # Focus followed the mouse onto the dock.
+        self.app.hide_if_inactive()
+        self.app.hide.assert_not_called()
+        self.namespace["dock_core"].inside.return_value = False  # Clicked a window elsewhere.
         self.app.hide_if_inactive()
         self.app.hide.assert_called_once()
 

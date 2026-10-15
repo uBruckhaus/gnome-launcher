@@ -71,7 +71,7 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f  ‪-‮⁦-⁩]")
 
 def default_page(page):
     return {"groups": [{"id": gid, "name": ""} for gid in BUILTIN_ORDER[page]],
-            "members": {}, "collapsed": []}
+            "members": {}, "collapsed": [], "order": []}
 
 
 def default_data():
@@ -127,7 +127,11 @@ def _clean_page(data, page):
     foldable = seen | set(ORIGINS)
     collapsed = [g for g in raw_collapsed if isinstance(g, str) and g in foldable][:MAX_GROUPS + 5] \
         if isinstance(raw_collapsed, list) else []
-    return {"groups": groups, "members": members, "collapsed": collapsed}
+    # Entries placed by hand inside their group (drag and drop), in order.
+    raw_order = data.get("order")
+    order = list(dict.fromkeys(k for k in raw_order if isinstance(k, str) and 0 < len(k) <= 300))[:MAX_MEMBERS] \
+        if isinstance(raw_order, list) else []
+    return {"groups": groups, "members": members, "collapsed": collapsed, "order": order}
 
 
 def save(data, path=None):
@@ -257,6 +261,19 @@ def move_group(data, gid, delta):
     return True
 
 
+def reorder_group(data, gid, target, after=False):
+    """Move group gid right before (or after) group target: a group dropped
+    on another. False when nothing changes."""
+    groups = data["groups"]
+    ids = [g["id"] for g in groups]
+    if gid == target or gid not in ids or target not in ids:
+        return False
+    group = groups.pop(ids.index(gid))
+    index = [g["id"] for g in groups].index(target) + (1 if after else 0)
+    groups.insert(index, group)
+    return [g["id"] for g in groups] != ids
+
+
 def toggle_collapsed(data, gid):
     if gid in data["collapsed"]:
         data["collapsed"].remove(gid)
@@ -278,7 +295,27 @@ def sections(entries, data, running=None):
         if "tray_id" not in app:
             buckets[group_of(app, data)].append(app)
     result = [(RUNNING, first)] if running is not None else []
-    return result + [(gid, buckets[gid]) for gid in order]
+    return result + [(gid, in_hand_order(buckets[gid], data)) for gid in order]
+
+
+def in_hand_order(members, data):
+    """Entries placed by hand first, in their order; the others after them
+    in the usual order."""
+    position = {key: i for i, key in enumerate(data.get("order") or ())}
+    last = len(position)
+    return sorted(members, key=lambda app: position.get(app.get("desktop_id"), last))
+
+
+def place(data, desktop_id, gid, target_id, member_ids, after=False):
+    """Put an entry into group gid right before (or after) target_id; None:
+    at the end. member_ids: the group's entries as shown, which then keep
+    this order."""
+    assign(data, desktop_id, gid)
+    ids = [i for i in member_ids if i != desktop_id]
+    index = ids.index(target_id) + (1 if after else 0) if target_id in ids else len(ids)
+    ids.insert(index, desktop_id)
+    moved = set(ids)
+    data["order"] = ([k for k in data.get("order") or () if k not in moved] + ids)[-MAX_MEMBERS:]
 
 
 def origin_sections(entries, classify, running=None):

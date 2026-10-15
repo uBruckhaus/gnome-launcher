@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import i18n  # noqa: E402
 
-SOURCES = ("launcher_popup.py", "launcher_core.py", "tray.py", "groups.py")
+SOURCES = ("launcher_popup.py", "launcher_core.py", "tray.py", "groups.py", "details.py", "dock.py", "cli_tools.py")
 
 
 def msgids():

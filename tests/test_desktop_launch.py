@@ -23,7 +23,8 @@ class DesktopLaunchTests(unittest.TestCase):
                     with self.assertRaises(TypeError):
                         launcher_core.GioUnix.DesktopAppInfo.new_from_filename(str(desktop))
                     with patch.object(launcher_core, "DESKTOP_DIRS", [directory]), \
-                            patch.object(launcher_core, "scan_standalone_appimages", return_value=[]):
+                            patch.object(launcher_core, "scan_standalone_appimages", return_value=[]), \
+                            patch.object(launcher_core.cli_tools, "cli_entries", return_value=[]):
                         apps = launcher_core.parse_desktop_files()
                     self.assertEqual(len(apps), 1)
                     with patch.object(launcher_core.shutil, "which", return_value=None), \

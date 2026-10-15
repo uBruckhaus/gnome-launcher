@@ -36,6 +36,7 @@ else:
     os.environ.pop("LD_PRELOAD", None)
 
 import atexit
+import faulthandler
 import colorsys
 import copy
 import shutil
@@ -44,6 +45,7 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
+    saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown,
     saved_size, set_saved_size, saved_position, set_saved_position,
     plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
@@ -59,6 +61,13 @@ import pidfile
 import shortcuts
 import threading
 import tray
+import updates
+import newapps
+import icons
+import dock_core
+import previews
+import tempfile
+import cairo
 
 # Height of the app list and the shortcut page, whatever they hold.
 LIST_HEIGHT = 590
@@ -71,7 +80,20 @@ TILE_MAX_WIDTH = 240   # The widest it gets: limits the popup's width.
 TILE_SPACING = 10
 MAX_COLUMNS = 6
 DRAG_PREFIX = "app-manager-entry:"  # A card dragged onto a group chip.
+DRAG_GROUP_PREFIX = "app-manager-group:"  # A group dragged to a new place.
+# Folder layout: each group a folder of FOLDER_COLUMNS x FOLDER_ROWS icons.
+FOLDER_COLUMNS = 3
+FOLDER_ROWS = 3
+FOLDER_ICON = 36
+FOLDER_CELL = FOLDER_ICON + 14  # The icon, its button's padding and border.
+# A folder's narrowest width: its icons, their spacing, the frame's padding
+# and border, and the tile's padding. Two fit side by side at the default size.
+FOLDER_TILE_WIDTH = FOLDER_COLUMNS * FOLDER_CELL + (FOLDER_COLUMNS - 1) * 6 + 2 * 6 + 2 + 2 * 4
 CARD_PADDING = 34      # The card's padding, left and right.
+DROP_MARKER = 4        # The drop marker bar's thickness.
+SETTINGS_CARD_WIDTH = 350  # A settings card: fits the small popup, the same for every group.
+HANG_LOG = Path.home() / ".local/state/applauncher/hang.log"
+WATCHDOG_SECONDS = 20  # The main loop silent this long: hung, log and exit.
 MAX_CARD_WIDTH = CARD_PADDING + MAX_COLUMNS * TILE_MAX_WIDTH + (MAX_COLUMNS - 1) * TILE_SPACING
 
 
@@ -79,6 +101,12 @@ def grid_columns(card_width):
     """Card columns at this popup width; 1 means the list."""
     inner = card_width - CARD_PADDING
     return max(1, min(MAX_COLUMNS, (inner + TILE_SPACING) // (TILE_WIDTH + TILE_SPACING)))
+
+
+def folder_columns(card_width):
+    """Folders side by side at this popup width (the folder layout's start page)."""
+    inner = card_width - CARD_PADDING
+    return max(1, (inner + TILE_SPACING) // (FOLDER_TILE_WIDTH + TILE_SPACING))
 
 # Where each browser lists its installed web apps.
 APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
@@ -279,11 +307,16 @@ class Launcher(Gtk.Application):
         # "list" or "groups" (collapsible groups); apps and plugins (Tab) each
         # have their own groups.
         self.view = saved_view()
+        # The list | groups | origin buttons in the small popup's header are
+        # a setting, off by default; then the popup shows the plain list.
+        self.view_buttons_on = view_buttons_shown()
         # The overview (popup resized to two or more columns): the same
         # entries as cards, one group (or all) at a time, picked in the
         # filter bar at the bottom. The filter is per page, like the groups.
         self.overview = False
         self.overview_filter = {"apps": "all", "plugins": "all"}
+        # "cards", or "folders": "All" shows each group as a folder of icons.
+        self.wide_layout = saved_wide_layout()
         self.height_pages = []  # Sub-pages as high as the list.
         self.card_w, self.list_h = CARD_WIDTH, LIST_HEIGHT
         self.resize_start = None
@@ -305,6 +338,15 @@ class Launcher(Gtk.Application):
         self.code_stamp = code_stamp()
         self.app_monitors = []
         self.apps_changed_source = 0
+        # Available updates (updates.check), refreshed in the background.
+        self.updates = {"apps": {}, "plugins": {}}
+        self.updates_at = None
+        self.updates_running = False
+        self.seen = newapps.load()  # When each entry was first seen (the new star).
+        self.icon_overrides = icons.load()  # Icons chosen by hand (Change icon…).
+        self.icon_app = None
+        self.icon_search_token = 0
+        self.icon_tmp = None
 
     @property
     def groups(self):
@@ -322,6 +364,24 @@ class Launcher(Gtk.Application):
     def show_hidden(self):
         return self.show_hidden_by_mode[self.list_kind]
 
+    def start_watchdog(self):
+        """If the main loop ever hangs, this full-screen layer would block the
+        whole desktop. A heartbeat re-arms faulthandler every 2 s; after 20 s
+        without one it writes every thread's stack to hang.log and exits, so
+        the desktop is free again and the next click starts a fresh popup."""
+        try:
+            HANG_LOG.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(HANG_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            self.hang_log = os.fdopen(fd, "a", buffering=1)
+        except OSError:
+            self.hang_log = sys.stderr
+
+        def beat():
+            faulthandler.dump_traceback_later(WATCHDOG_SECONDS, exit=True, file=self.hang_log)
+            return GLib.SOURCE_CONTINUE
+        beat()
+        GLib.timeout_add_seconds(2, beat)
+
     def do_shutdown(self):
         cleanup_pid()
         super().do_shutdown()
@@ -338,6 +398,7 @@ class Launcher(Gtk.Application):
                 signal.signal(sig, lambda *_: sys.exit(0))
             GLib.timeout_add(100, lambda: True)  # Let Python dispatch SIGUSR1.
             GLib.timeout_add_seconds(1, self.poll)
+            self.start_watchdog()
             self.watch_app_dirs()
             write_pid_file()
         self.open()
@@ -560,11 +621,32 @@ class Launcher(Gtk.Application):
         grid.set_valign(Gtk.Align.START)
         grid.set_row_spacing(TILE_SPACING)
         grid.set_column_spacing(TILE_SPACING)
-        grid.connect("child-activated", lambda _g, tile: self.launch(tile.app, tile.actions_button))
+        grid.connect("child-activated", lambda _g, tile: self.activate_tile(tile))
         grid.connect("selected-children-changed", lambda *_a: self.mark_selected_group())
         grid.set_vadjustment(grid_scroller.get_vadjustment())  # Keyboard moves scroll along.
         grid_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        grid_box.append(grid)
+        # The drop marker for reordering folders: a bar in the gap between two.
+        grid_layer = Gtk.Overlay()
+        grid_layer.set_child(grid)
+        self.grid_marker = self.drop_marker()
+        grid_layer.add_overlay(self.grid_marker)
+        grid_box.append(grid_layer)
+        # Folder layout: a filter field above the folders (typing anywhere
+        # goes there too). Kept in step with search_query.
+        filter_entry = Gtk.SearchEntry()
+        filter_entry.add_css_class("launcher-filter-entry")
+        filter_entry.set_placeholder_text(_("Type to filter"))
+        filter_entry.set_max_width_chars(1)
+        filter_entry.set_hexpand(True)
+        filter_entry.set_visible(False)
+        filter_entry.get_delegate().set_max_length(200)
+        filter_entry.connect("search-changed", self.on_filter_entry_changed)
+        filter_entry.connect("activate", lambda *_a: self.selected_item() is not None
+                             and self.activate_tile(self.selected_item()))
+        # Esc in the field: clear it, then leave the folder, then close.
+        filter_entry.connect("stop-search", lambda *_a: self.on_escape())
+        self.guard_text_field(filter_entry)
+        self.filter_entry = filter_entry
         empty = Gtk.Label(label=_("Nothing to show here"))
         empty.add_css_class("sc-empty")
         empty.set_margin_top(40)
@@ -572,6 +654,8 @@ class Launcher(Gtk.Application):
         grid_box.append(empty)
         grid_scroller.set_child(grid_box)
         stack.add_named(grid_scroller, "overview")
+        card.insert_child_after(filter_entry, self.header_bar)
+        stack.connect("notify::visible-child-name", lambda *_a: self.sync_filter_entry())
 
         # Under the overview: apps | plugins, then one button per group.
         filter_bar = Gtk.Box(spacing=8)
@@ -597,7 +681,9 @@ class Launcher(Gtk.Application):
         new_group.set_valign(Gtk.Align.CENTER)
         new_box = Gtk.Box(spacing=4)
         new_box.append(Gtk.Image.new_from_icon_name("list-add-symbolic"))
-        new_box.append(Gtk.Label(label=_("New group")))
+        new_label = Gtk.Label(label=_("New group"))
+        new_box.append(new_label)
+        self.new_group_label = new_label  # Hidden while narrow: room for the groups.
         new_group.set_child(new_box)
         new_group.set_tooltip_text(_("New group (or drop a card here to start one with it)"))
         new_group.set_focus_on_click(False)
@@ -612,7 +698,11 @@ class Launcher(Gtk.Application):
         chips_scroller.set_hexpand(True)
         chips = Gtk.Box(spacing=6)
         chips.set_margin_bottom(4)  # Room for the overlay scrollbar.
-        chips_scroller.set_child(chips)
+        chips_layer = Gtk.Overlay()  # The drop marker for reordering groups.
+        chips_layer.set_child(chips)
+        self.chips_marker = self.drop_marker()
+        chips_layer.add_overlay(self.chips_marker)
+        chips_scroller.set_child(chips_layer)
         # The mouse wheel scrolls the row of groups sideways.
         wheel = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.VERTICAL)
         wheel.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
@@ -630,6 +720,23 @@ class Launcher(Gtk.Application):
         filter_bar.append(self.filter_arrows[0])
         filter_bar.append(chips_scroller)
         filter_bar.append(self.filter_arrows[1])
+        # Cards or folders, like a start menu's "View: Category".
+        layout_switch = Gtk.Box()
+        layout_switch.add_css_class("linked")
+        layout_switch.add_css_class("launcher-view-switch")
+        layout_switch.set_valign(Gtk.Align.CENTER)
+        self.layout_buttons = {}
+        for layout, icon, tip in (("cards", "view-grid-symbolic", _("Show every entry as a card")),
+                                  ("folders", "folder-symbolic", _("Show the groups as folders"))):
+            button = Gtk.Button(icon_name=icon)
+            button.add_css_class("flat")
+            button.add_css_class("launcher-header-btn")
+            button.set_tooltip_text(tip)
+            button.set_focus_on_click(False)
+            button.connect("clicked", lambda _b, l=layout: self.set_wide_layout(l))
+            layout_switch.append(button)
+            self.layout_buttons[layout] = button
+        filter_bar.append(layout_switch)
         adjustment = chips_scroller.get_hadjustment()
         for signal_name in ("changed", "value-changed"):
             # Not during the layout pass that changed it: showing the arrows resizes.
@@ -658,6 +765,7 @@ class Launcher(Gtk.Application):
         self.build_settings_page()
         self.build_group_name_page()
         self.build_details_page()
+        self.build_icon_page()
         self.apply_theme()
         self.resize_to(*self.saved_card_size())
         self.move_to(self.position)
@@ -687,8 +795,29 @@ class Launcher(Gtk.Application):
     def saved_card_size(self):
         return saved_size("size") or self.default_card_size()
 
+    @staticmethod
+    def dock_space():
+        """{"left"|"right"|"bottom": pixels} the card keeps free for an
+        auto-hiding dock, which this popup keeps shown while open. A dock
+        without auto-hide reserves its space itself (exclusive zone)."""
+        try:
+            dock = dock_core.settings()
+        except Exception:
+            return {}
+        if not (dock["dock_enabled"] and dock["dock_autohide"]):
+            return {}
+        # The dock's whole thickness (band, icons sticking out, growth) and a gap.
+        return {dock_core.edge(dock, dock_core.bar_position()): dock_core.sizes(dock)[2] + 12}
+
     def screen_size(self):
-        """The room the card has: the overlay fills the monitor (less the bar)."""
+        """The room the card has: the overlay fills the monitor (less the
+        bar, and less an auto-hiding dock's edge)."""
+        width, height = self.full_screen_size()
+        space = self.dock_space()
+        return (width - space.get("left", 0) - space.get("right", 0),
+                height - space.get("bottom", 0) - space.get("top", 0))
+
+    def full_screen_size(self):
         width, height = self.overlay.get_width(), self.overlay.get_height()
         if width > 0 and height > 0:
             return width, height
@@ -710,11 +839,13 @@ class Launcher(Gtk.Application):
         screen_w, screen_h = self.screen_size()
         self.card_w = max(CARD_WIDTH, min(int(width), screen_w - 48, MAX_CARD_WIDTH))
         columns = grid_columns(self.card_w)
-        # Header, filter bar, padding and the 24 px margins around the card.
-        chrome = 150 if columns > 1 else 110
+        folders = self.wide_layout == "folders"
+        # Header, filter bar (and field), padding and the 24 px margins around the card.
+        chrome = (190 if folders else 150) if columns > 1 else 110
         self.list_h = max(MIN_LIST_HEIGHT, min(int(height), screen_h - chrome))
         max_w = max(CARD_WIDTH, min(screen_w - 48, MAX_CARD_WIDTH))
-        self.max_card_size = (max_w, max(MIN_LIST_HEIGHT, screen_h - (150 if grid_columns(max_w) > 1 else 110)))
+        max_chrome = (190 if folders else 150) if grid_columns(max_w) > 1 else 110
+        self.max_card_size = (max_w, max(MIN_LIST_HEIGHT, screen_h - max_chrome))
         self.card.set_size_request(self.card_w, -1)
         for scroller in (self.scroller, self.grid_scroller):
             # Raise the maximum first: GTK refuses a minimum above the maximum.
@@ -730,11 +861,14 @@ class Launcher(Gtk.Application):
                 page.set_size_request(-1, self.list_h)
         if self.shortcut_app is not None:
             self.sc_page.set_size_request(-1, self.list_h)
-        self.grid.set_min_children_per_line(columns)
-        self.grid.set_max_children_per_line(columns)
-        self.grid_columns = columns
-        if (columns > 1) != self.overview:
-            self.set_overview(columns > 1)
+        self.apply_grid_columns()
+        if hasattr(self, "new_group_label"):
+            self.new_group_label.set_visible(self.card_w >= 700)
+        # The list at the default size; cards or folders once two fit side by side.
+        overview = columns > 1
+        if overview != self.overview:
+            self.set_overview(overview)
+        self.sync_previews()  # Animated previews in the wide popup only.
         self.update_mouse_hint()
         if save:
             default = (self.card_w, self.list_h) == tuple(self.default_card_size())
@@ -872,18 +1006,22 @@ class Launcher(Gtk.Application):
     def move_to(self, position, save=False):
         """Put the card's top-left at position (kept on screen), or centre it for None."""
         frame = self.card_frame
+        space = self.dock_space()
+        left = space.get("left", 0)
         if position is not None:
             screen_w, screen_h = self.screen_size()
             frame_w, frame_h = frame.get_width(), frame.get_height()
-            position = (max(0, min(int(position[0]), screen_w - frame_w)),
-                        max(0, min(int(position[1]), screen_h - frame_h)))
+            top = space.get("top", 0)
+            position = (max(left, min(int(position[0]), left + screen_w - frame_w)),
+                        max(top, min(int(position[1]), top + screen_h - frame_h)))
         self.position = position
+        frame.set_margin_end(space.get("right", 0) if position is None else 0)
         if position is None:
             frame.set_halign(Gtk.Align.CENTER)
             frame.set_valign(Gtk.Align.CENTER)
-            frame.set_margin_start(0)
-            frame.set_margin_top(24)
-            frame.set_margin_bottom(24)
+            frame.set_margin_start(left)  # Centred in the room the dock leaves.
+            frame.set_margin_top(24 + space.get("top", 0))
+            frame.set_margin_bottom(24 + space.get("bottom", 0))
         else:
             frame.set_halign(Gtk.Align.START)
             frame.set_valign(Gtk.Align.START)
@@ -895,6 +1033,14 @@ class Launcher(Gtk.Application):
                 set_saved_position(position)
             except OSError as error:
                 self.notify(_("Could not save the setting"), str(error))
+
+    def apply_grid_columns(self):
+        """Folders or cards per row at the current width."""
+        columns = folder_columns(self.card_w) if self.showing_folders() else grid_columns(self.card_w)
+        if columns != getattr(self, "grid_columns", None):
+            self.grid.set_min_children_per_line(columns)
+            self.grid.set_max_children_per_line(columns)
+            self.grid_columns = columns
 
     def set_overview(self, enabled):
         """List (one column) or overview (cards): follows the popup's width.
@@ -943,6 +1089,10 @@ class Launcher(Gtk.Application):
         if wanted not in {gid for gid, _label, _members in sections}:
             wanted = "all"
         self.fill_filter_bar(sections, wanted)
+        self.apply_grid_columns()
+        if self.showing_folders(wanted):
+            self.fill_folders(sections, selected_id)
+            return
         members = next(m for gid, _label, m in sections if gid == wanted)
         if wanted == "all" and (self.mode == "plugins" or self.running_first):
             # Stable sort: running apps (tray icons) first, each part in the usual order.
@@ -961,9 +1111,251 @@ class Launcher(Gtk.Application):
             self.grid.select_child(selected)
             GLib.timeout_add(50, self.ensure_tile_visible, selected)
 
+    def on_filter_entry_changed(self, entry):
+        if getattr(self, "filter_syncing", False):
+            return
+        text = entry.get_text()
+        if text != self.search_query:
+            self.search_query = text
+            self.refresh_list()
+
+    def sync_filter_entry(self):
+        entry = getattr(self, "filter_entry", None)
+        if entry is None or not hasattr(self, "stack"):
+            return
+        entry.set_visible(self.overview and self.wide_layout == "folders" and self.main_page_open())
+        if entry.get_text() != self.search_query:
+            self.filter_syncing = True
+            entry.set_text(self.search_query)
+            entry.set_position(-1)
+            self.filter_syncing = False
+
+    def on_escape(self):
+        if self.search_query:
+            self.search_query = ""
+            self.refresh_list()
+        elif self.open_folder():
+            self.leave_folder()
+        else:
+            self.hide()
+
+    def filter_has_focus(self):
+        entry = getattr(self, "filter_entry", None)
+        return entry is not None and entry.get_visible() and entry.get_delegate().has_focus()
+
+    def showing_folders(self, wanted=None):
+        """The folder layout's start page: "All", not typing to filter."""
+        if wanted is None:
+            wanted = self.overview_filter[self.mode]
+        return (self.overview and self.wide_layout == "folders" and wanted == "all"
+                and not self.search_query.strip())
+
+    def open_folder(self):
+        """In a folder of the folder layout (Esc / Backspace go back)."""
+        return (self.overview and self.wide_layout == "folders" and not self.search_query.strip()
+                and self.overview_filter[self.mode] != "all")
+
+    def fill_folders(self, sections, selected_id):
+        while child := self.grid.get_first_child():
+            self.grid.remove(child)
+        selected = None
+        shown = 0
+        for gid, label, members in sections:
+            if gid == "all" or (not members and gid in (groups.RUNNING, groups.OTHER)):
+                continue
+            tile = self.make_folder_tile(gid, label, members)
+            self.grid.append(tile)
+            shown += 1
+            if selected is None and selected_id == "group:" + gid:
+                selected = tile
+        self.grid_empty.set_visible(not shown)
+        selected = selected or self.grid.get_child_at_index(0)
+        if selected is not None:
+            self.grid.select_child(selected)
+            GLib.timeout_add(50, self.ensure_tile_visible, selected)
+
+    def set_wide_layout(self, layout):
+        if layout == self.wide_layout:
+            return
+        self.wide_layout = layout
+        try:
+            set_wide_layout(layout)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        self.sync_layout_controls()
+        # The folders start on "All", where the folders are.
+        self.overview_filter[self.mode] = "all"
+        before = self.overview
+        self.resize_to(self.card_w, self.list_h)
+        if self.overview and before:
+            self.refresh_list()
+
+    def sync_layout_controls(self):
+        for layout, button in getattr(self, "layout_buttons", {}).items():
+            if layout == self.wide_layout:
+                button.add_css_class("launcher-toggle-active")
+            else:
+                button.remove_css_class("launcher-toggle-active")
+        dropdown = getattr(self, "layout_dropdown", None)
+        if dropdown is not None:
+            self.layout_syncing = True
+            dropdown.set_selected(0 if self.wide_layout == "folders" else 1)
+            self.layout_syncing = False
+
+    def leave_folder(self):
+        gid = self.overview_filter[self.mode]
+        self.overview_filter[self.mode] = "all"
+        self.refresh_list(selected_id="group:" + gid)
+
+    def activate_tile(self, tile):
+        if hasattr(tile, "group"):
+            self.set_overview_filter(tile.group)
+        else:
+            self.launch(tile.app, tile.actions_button)
+
+    def make_folder_tile(self, gid, label, members):
+        """A group in the folder layout: a box with its icons (each opens its
+        app; nine show, more scroll) and the name under it. A click elsewhere
+        on it opens the group; right click: rename, move, delete."""
+        tile = Gtk.FlowBoxChild()
+        tile.group = gid
+        tile.add_css_class("launcher-folder")
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        # Every folder is the same size: three rows of three icons. More
+        # than nine scroll inside the folder.
+        icons = Gtk.Grid(column_spacing=6, row_spacing=6, column_homogeneous=True, row_homogeneous=True)
+        icons.set_halign(Gtk.Align.FILL)
+        icons.set_valign(Gtk.Align.START)
+        icon_marker = self.drop_marker()
+        for index in range(max(FOLDER_COLUMNS * FOLDER_ROWS, len(members))):
+            if index < len(members):
+                app = members[index]
+                button = Gtk.Button()
+                button.add_css_class("flat")
+                button.add_css_class("launcher-folder-app")
+                note = self.update_note(app)
+                hidden = app["desktop_id"] in self.hidden_ids_for(app)
+                off_bar = self.off_bar(app)
+                slot = Gtk.Overlay()
+                icon = self.app_icon(app, FOLDER_ICON)
+                slot.set_child(icon)
+                if note:
+                    # A small mark on the icon, like the run dot on the cards.
+                    mark = Gtk.Box()
+                    mark.add_css_class("launcher-update-dot")
+                    mark.set_halign(Gtk.Align.END)
+                    mark.set_valign(Gtk.Align.START)
+                    mark.set_can_target(False)
+                    slot.add_overlay(mark)
+                is_new = self.is_new(app)
+                if is_new:
+                    star = Gtk.Label(label="★")
+                    star.add_css_class("launcher-new-star")
+                    star.set_halign(Gtk.Align.START)
+                    star.set_valign(Gtk.Align.START)
+                    star.set_can_target(False)
+                    slot.add_overlay(star)
+                if hidden or off_bar:
+                    # Shown only with "show hidden": faded, grey, dashed, with
+                    # the crossed-out eye (or the minus of "not in bar").
+                    icon.add_css_class("launcher-folder-hidden-icon")
+                    button.add_css_class("launcher-folder-hidden")
+                    mark = Gtk.Image.new_from_icon_name("view-conceal-symbolic" if hidden else "list-remove-symbolic")
+                    mark.set_pixel_size(12)
+                    mark.add_css_class("launcher-folder-hidden-mark")
+                    mark.set_halign(Gtk.Align.START)
+                    mark.set_valign(Gtk.Align.END)
+                    mark.set_can_target(False)
+                    slot.add_overlay(mark)
+                button.set_child(slot)
+                button.set_size_request(FOLDER_CELL, FOLDER_CELL)
+                tip = app["name"]
+                if hidden or off_bar:
+                    tip += " (" + (_("Hidden") if hidden else _("Not in bar")) + ")"
+                if is_new:
+                    tip += " · ★ " + _("Newly installed")
+                button.set_tooltip_text(f"{tip}\n{note}" if note else tip)
+                # Right click: the entry's own actions, as on its card.
+                menu_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+                menu_click.connect("pressed", lambda gesture, *_a, b=button, a=app: (
+                    gesture.set_state(Gtk.EventSequenceState.CLAIMED), self.show_actions(b, a)))
+                button.add_controller(menu_click)
+                button.set_focus_on_click(False)
+                button.set_can_focus(False)
+                button.connect("clicked", lambda b, a=app: self.launch(a, b))
+                button.folder_app = app  # Dragged by the folder's drag source.
+                if gid != groups.RUNNING:
+                    button.drop_marker = (icon_marker, icons, 6)
+                    self.add_icon_drop(button, gid, app)
+                cell = button
+            else:
+                cell = Gtk.Box()  # Keeps three columns in small groups.
+                cell.set_size_request(FOLDER_CELL, FOLDER_CELL)
+            icons.attach(cell, index % FOLDER_COLUMNS, index // FOLDER_COLUMNS, 1, 1)
+        scroller = Gtk.ScrolledWindow()
+        scroller.add_css_class("launcher-folder-scroller")
+        height = FOLDER_ROWS * FOLDER_CELL + (FOLDER_ROWS - 1) * 6
+        scroller.set_min_content_height(height)
+        scroller.set_max_content_height(height)
+        # Only a folder with more than nine scrolls; the others let the
+        # wheel scroll the page.
+        overflow = len(members) > FOLDER_COLUMNS * FOLDER_ROWS
+        scroller.set_policy(Gtk.PolicyType.NEVER,
+                            Gtk.PolicyType.AUTOMATIC if overflow else Gtk.PolicyType.NEVER)
+        icons_layer = Gtk.Overlay()  # The drop marker for reordering icons.
+        icons_layer.set_child(icons)
+        icons_layer.add_overlay(icon_marker)
+        scroller.set_child(icons_layer)
+        frame = Gtk.Box()
+        frame.add_css_class("launcher-folder-icons")
+        frame.append(scroller)
+        scroller.set_hexpand(True)
+        box.append(frame)
+        name = Gtk.Label(label=label, xalign=0.5)
+        name.add_css_class("launcher-folder-name")
+        name.set_ellipsize(3)
+        name.set_max_width_chars(1)
+        name.set_hexpand(True)
+        box.append(name)
+        tile.set_child(box)
+        tile.actions_button = frame
+        count = ngettext("{0} entry", "{0} entries", len(members)).format(len(members))
+        tile.set_tooltip_text(f"{label} · {count}\n" + _("Click to open the group, or an icon to start it. Esc goes back."))
+        motion = Gtk.EventControllerMotion()
+        motion.connect("enter", lambda *_a, t=tile: t not in self.grid.get_selected_children()
+                       and self.select_tile(t))
+        tile.add_controller(motion)
+        if gid != groups.RUNNING:
+            tile.drop_marker = (self.grid_marker, self.grid, TILE_SPACING)
+            self.add_group_drop(tile, gid, "launcher-folder-drop")
+        # One drag source for the folder: an icon drags its app (onto another
+        # folder or group chip: moves it there), the rest of the folder the
+        # group (onto another group: takes its place).
+        drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        drag.connect("prepare", lambda _s, x, y, t=tile: self.prepare_folder_drag(t, x, y))
+        drag.connect("drag-begin", lambda source, _d: self.begin_folder_drag(source))
+        drag.connect("drag-end", lambda *_a: (self.on_tile_drag_end(), self.on_group_drag_end()))
+        tile.add_controller(drag)
+        if gid not in (groups.RUNNING, groups.OTHER):
+            menu_click = Gtk.GestureClick(button=Gdk.BUTTON_SECONDARY)
+            menu_click.connect("pressed", lambda *_a, t=tile: self.show_group_actions(t.actions_button, gid))
+            tile.add_controller(menu_click)
+        return tile
+
+    @staticmethod
+    def app_icon(app, size):
+        icon_name = app.get("icon") or "application-x-executable"
+        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
+        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
+        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
+        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+        icon.set_pixel_size(size)
+        return icon
+
     def ensure_tile_visible(self, tile):
         if tile.get_parent() == self.grid and tile in self.grid.get_selected_children():
-            tile.grab_focus()
+            if not self.filter_has_focus():  # Keep typing in the filter field.
+                tile.grab_focus()
             ok, bounds = tile.compute_bounds(self.grid)
             if ok:
                 self.grid_scroller.get_vadjustment().clamp_page(
@@ -1012,6 +1404,7 @@ class Launcher(Gtk.Application):
             self.filter_ids.append(gid)
             self.filter_buttons[gid] = button
         self.new_group_button.set_sensitive(len(self.groups["groups"]) < groups.MAX_GROUPS)
+        self.sync_layout_controls()
         GLib.idle_add(self.reveal_filter_chip)
 
     def mark_selected_group(self):
@@ -1019,8 +1412,12 @@ class Launcher(Gtk.Application):
         tile = self.selected_item() if self.overview else None
         app = getattr(tile, "app", None)
         gid = groups.group_of(app, self.groups) if app is not None and "tray_id" not in app else None
+        if hasattr(tile, "group"):
+            gid = tile.group
         for chip_gid, button in getattr(self, "filter_buttons", {}).items():
-            if chip_gid == gid:
+            if chip_gid == gid and app is None:
+                button.add_css_class("launcher-filter-current")
+            elif chip_gid == gid:
                 button.add_css_class("launcher-filter-current")
                 button.set_tooltip_text(_("{0} is in this group. Drag it onto another group to move it.").format(app["name"]))
             elif button.has_css_class("launcher-filter-current"):
@@ -1089,12 +1486,7 @@ class Launcher(Gtk.Application):
             tile.add_css_class("launcher-row-hidden")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         top = Gtk.Box(spacing=6)
-        icon_name = app.get("icon") or "application-x-executable"
-        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
-        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
-        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
-        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
-        icon.set_pixel_size(44)
+        icon = self.app_icon(app, 44)
         if is_hidden or off_bar:
             icon.add_css_class("launcher-hidden-icon")
         icon_slot = Gtk.Overlay()
@@ -1143,6 +1535,11 @@ class Launcher(Gtk.Application):
             foot.append(self.tile_badge("view-conceal-symbolic", _("Hidden")))
         if off_bar:
             foot.append(self.tile_badge("list-remove-symbolic", _("Not in bar")))
+        if self.is_new(app):
+            foot.append(self.new_star())
+        note = self.update_note(app)
+        if note:
+            foot.append(self.update_badge(note))
         assigned = self.app_shortcuts(app, self.list_bindings)
         if assigned:
             chip = Gtk.Label(label=shortcuts.combo_label(assigned[0]).replace(" + ", "+"))
@@ -1191,21 +1588,171 @@ class Launcher(Gtk.Application):
         self.tile_dragging = False
         self.dragged_app = None
         self.filter_bar.remove_css_class("launcher-filter-dragging")
+        self.clear_all_drop_marks()
+        self.refresh_held_back()
+
+    def clear_all_drop_marks(self):
+        for widget in getattr(self, "drop_marked", []):
+            self.clear_drop_marks(widget, "launcher-filter-drop", "launcher-folder-drop")
+        self.drop_marked = []
+
+    def refresh_held_back(self):
+        held = getattr(self, "refresh_after_drag", None)
+        if held is not None and not getattr(self, "tile_dragging", False) \
+                and getattr(self, "dragged_group", None) is None:
+            self.refresh_after_drag = None
+            self.refresh_list(selected_id=held[0])
 
     def add_chip_drop(self, button, gid):
         """Cards dropped on the chip move to group gid (None: a new group).
         Only drags that started on one of our own cards are accepted, and the
         offered data is never read: the card being dragged is known already.
         (A plain DropTarget would buffer whatever another app offers, unbounded.)"""
-        target = Gtk.DropTargetAsync.new(None, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        target.connect("accept", lambda _t, drop: self.own_card_drag(drop))
-        # Hyprland preselects MOVE: accept both, or the drop is refused.
-        target.connect("drag-enter", lambda *_a, b=button: b.add_css_class("launcher-filter-drop") or Gdk.DragAction.COPY)
-        target.connect("drag-motion", lambda *_a: Gdk.DragAction.COPY)
-        target.connect("drag-leave", lambda *_a, b=button: b.remove_css_class("launcher-filter-drop"))
-        target.connect("drop", self.on_chip_drop, gid)
-        button.add_controller(target)
+        self.add_group_drop(button, gid, "launcher-filter-drop")
         button.add_css_class("launcher-filter-group")
+        if gid is not None:  # "New group" takes cards only, never a group: no bar.
+            button.drop_marker = (self.chips_marker, self.filter_chips, 6)
+        if gid in {g["id"] for g in self.groups["groups"]}:
+            # Drag a group's chip onto another group to change the order.
+            self.add_group_drag(button, gid)
+
+    def add_group_drop(self, widget, gid, css_class):
+        """Our own cards (or folder icons) dropped on widget move to group
+        gid; a dragged group takes gid's place in the order."""
+        target = Gtk.DropTargetAsync.new(None, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        target.connect("accept", lambda _t, drop: self.accepts_drop(drop, gid))
+        # Hyprland preselects MOVE: accept both, or the drop is refused.
+        target.connect("drag-enter", lambda _t, _d, x, _y, w=widget: self.on_group_drag_over(w, gid, css_class, x))
+        target.connect("drag-motion", lambda _t, _d, x, _y, w=widget: self.on_group_drag_over(w, gid, css_class, x))
+        target.connect("drag-leave", lambda *_a, w=widget: self.clear_drop_marks(w, css_class))
+        target.connect("drop", self.on_chip_drop, gid)
+        widget.add_controller(target)
+
+    def on_group_drag_over(self, widget, gid, css_class, x):
+        """A card over a group: highlight it. A group over another: a bar on
+        the side it will land on (left half: before it, right half: after)."""
+        if not self.accepts_drop(None, gid):
+            return 0
+        if getattr(self, "dragged_group", None) is not None:
+            self.mark_drop_side(widget, x, "launcher-drop")
+        else:
+            widget.add_css_class(css_class)
+            if widget not in getattr(self, "drop_marked", []):
+                self.drop_marked = getattr(self, "drop_marked", []) + [widget]
+        return Gdk.DragAction.COPY
+
+    @staticmethod
+    def drop_marker():
+        """An accent bar shown in the gap where a dragged item will land."""
+        marker = Gtk.Box()
+        marker.add_css_class("launcher-drop-marker")
+        marker.set_can_target(False)
+        marker.set_halign(Gtk.Align.START)
+        marker.set_valign(Gtk.Align.START)
+        marker.set_visible(False)
+        return marker
+
+    def mark_drop_side(self, widget, x, _prefix=None):
+        """Show the bar before or after widget (left or right half of it);
+        remember the side for the drop."""
+        self.drop_after = x > widget.get_width() / 2
+        if widget not in getattr(self, "drop_marked", []):
+            self.drop_marked = getattr(self, "drop_marked", []) + [widget]
+        marker, container, gap = widget.drop_marker
+        ok, bounds = widget.compute_bounds(container)
+        if not ok:
+            return
+        edge = bounds.get_x() + (bounds.get_width() if self.drop_after else 0)
+        edge += gap / 2 if self.drop_after else -gap / 2
+        marker.set_margin_start(max(0, round(edge - DROP_MARKER / 2)))
+        marker.set_margin_top(max(0, round(bounds.get_y())))
+        marker.set_size_request(DROP_MARKER, max(1, round(bounds.get_height())))
+        marker.set_visible(True)
+
+    @staticmethod
+    def clear_drop_marks(widget, *classes):
+        for name in classes:
+            widget.remove_css_class(name)
+        marker = getattr(widget, "drop_marker", None)
+        if marker is not None:
+            marker[0].set_visible(False)
+
+    def accepts_drop(self, drop, gid):
+        group = getattr(self, "dragged_group", None)
+        if group is not None:
+            # Groups only trade places with other groups (Other stays last).
+            return gid not in (None, group) and gid in {g["id"] for g in self.groups["groups"]}
+        return self.own_card_drag(drop)
+
+    def add_group_drag(self, widget, gid):
+        drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        drag.connect("prepare", lambda *_a: Gdk.ContentProvider.new_for_value(DRAG_GROUP_PREFIX + gid))
+        drag.connect("drag-begin", lambda source, _d, w=widget: self.on_group_drag_begin(source, w, gid))
+        drag.connect("drag-end", lambda *_a: self.on_group_drag_end())
+        widget.add_controller(drag)
+
+    def add_icon_drop(self, button, gid, app):
+        """An icon dragged onto another icon lands right before or after it
+        (a bar shows where), in this group."""
+        target = Gtk.DropTargetAsync.new(None, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        accepts = lambda: (getattr(self, "dragged_group", None) is None and self.own_card_drag(None)
+                           and self.dragged_app.get("desktop_id") != app["desktop_id"])
+        target.connect("accept", lambda *_a: accepts())
+
+        def over(_t, _d, x, _y):
+            if not accepts():
+                return 0
+            self.mark_drop_side(button, x, "launcher-icon-drop")
+            return Gdk.DragAction.COPY
+        target.connect("drag-enter", over)
+        target.connect("drag-motion", over)
+        target.connect("drag-leave", lambda *_a: self.clear_drop_marks(button))
+
+        def dropped(_t, drop, _x, _y):
+            self.clear_drop_marks(button)
+            dragged = getattr(self, "dragged_app", None)
+            if not accepts() or dragged is None or "tray_id" in dragged:
+                drop.finish(0)
+                return False
+            drop.finish(Gdk.DragAction.COPY)
+            self.put_in_group(dragged, gid, app["desktop_id"], getattr(self, "drop_after", False))
+            return True
+        target.connect("drop", dropped)
+        button.add_controller(target)
+
+    def prepare_folder_drag(self, tile, x, y):
+        widget = tile.pick(x, y, Gtk.PickFlags.DEFAULT)
+        while widget is not None and widget is not tile and not hasattr(widget, "folder_app"):
+            widget = widget.get_parent()
+        app = getattr(widget, "folder_app", None)
+        if app is not None:
+            if "tray_id" in app:
+                return None
+            self.folder_drag = ("app", app, widget.get_child())
+            return Gdk.ContentProvider.new_for_value(DRAG_PREFIX + app["desktop_id"])
+        if tile.group in {g["id"] for g in self.groups["groups"]}:
+            self.folder_drag = ("group", tile.group, tile)
+            return Gdk.ContentProvider.new_for_value(DRAG_GROUP_PREFIX + tile.group)
+        return None
+
+    def begin_folder_drag(self, source):
+        kind, target, widget = getattr(self, "folder_drag", (None, None, None))
+        self.folder_drag = None
+        if kind == "app":
+            self.on_tile_drag_begin(source, widget, target)
+        elif kind == "group":
+            self.on_group_drag_begin(source, widget, target)
+
+    def on_group_drag_begin(self, source, widget, gid):
+        self.dragged_group = gid
+        source.set_icon(Gtk.WidgetPaintable.new(widget), 20, 12)
+        self.filter_bar.add_css_class("launcher-filter-dragging")
+
+    def on_group_drag_end(self):
+        self.dragged_group = None
+        self.filter_bar.remove_css_class("launcher-filter-dragging")
+        self.clear_all_drop_marks()
+        self.refresh_held_back()
 
     def own_card_drag(self, _drop):
         """Only while one of our cards is being dragged (there is one pointer:
@@ -1213,6 +1760,16 @@ class Launcher(Gtk.Application):
         return getattr(self, "tile_dragging", False) and getattr(self, "dragged_app", None) is not None
 
     def on_chip_drop(self, _target, drop, _x, _y, gid):
+        group = getattr(self, "dragged_group", None)
+        if group is not None:
+            if not self.accepts_drop(drop, gid):
+                drop.finish(0)
+                return False
+            drop.finish(Gdk.DragAction.COPY)
+            if groups.reorder_group(self.groups, group, gid, after=getattr(self, "drop_after", False)):
+                self.save_groups()
+                self.refresh_list(selected_id="group:" + group)
+            return True
         app = getattr(self, "dragged_app", None)
         if not self.own_card_drag(drop) or app is None or "tray_id" in app:
             drop.finish(0)
@@ -1243,7 +1800,8 @@ class Launcher(Gtk.Application):
     def select_tile(self, tile):
         if tile is not None:
             self.grid.select_child(tile)
-            tile.grab_focus()
+            if not self.filter_has_focus():
+                tile.grab_focus()
 
     def overview_key(self, key, state):
         """Arrows, Home/End and Page keys in the card grid. True when handled."""
@@ -1390,13 +1948,24 @@ class Launcher(Gtk.Application):
             padding: 1px 6px; margin-right: 0; }}
         .launcher-gear {{ font-family: "JetBrainsMono Nerd Font", "Symbols Nerd Font", monospace; font-size: 13px; }}
         .launcher-section-title {{ font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+        .launcher-settings-card {{ background: alpha({colors['foreground']}, 0.04);
+            border: 1px solid alpha({colors['foreground']}, 0.12); border-radius: {radius}px; padding: 12px 14px; }}
         separator.launcher-settings-rule {{ background-color: alpha({colors['foreground']}, 0.12); background-image: none; min-height: 1px; margin: 0 0 2px 0; }}
-        .launcher-card label.launcher-setting-label {{ font-size: 11px; color: {dim_hex}; }}
-        dropdown.launcher-compact-dropdown > button {{ min-height: 0; padding: 2px 8px; font-size: 11px;
+        /* Option names: easy to read (they were 11 px in the dim grey). */
+        .launcher-card label.launcher-setting-label {{ font-size: 13px; color: alpha({colors['foreground']}, 0.88); }}
+        .launcher-settings-card label.launcher-settings-hint {{ font-size: 12px; color: alpha({colors['foreground']}, 0.65); }}
+        dropdown.launcher-compact-dropdown > button {{ min-height: 0; padding: 2px 8px; font-size: 12px;
             border: 1px solid alpha({colors['foreground']}, 0.35); border-radius: {radius}px; background: transparent; }}
-        dropdown.launcher-compact-dropdown popover label {{ font-size: 11px; }}
-        switch.launcher-compact-switch {{ min-height: 16px; min-width: 36px; }}
-        switch.launcher-compact-switch slider {{ min-width: 14px; min-height: 14px; margin: 1px; }}
+        dropdown.launcher-compact-dropdown popover label {{ font-size: 12px; }}
+        /* Clearly visible on the dark card: a light track and knob when off,
+           the accent when on; only a switch that cannot be used is faded. */
+        switch.launcher-compact-switch {{ min-height: 16px; min-width: 36px;
+            background: alpha({colors['foreground']}, 0.22); border: 1px solid alpha({colors['foreground']}, 0.45); }}
+        switch.launcher-compact-switch:checked {{ background: {colors['accent']}; border-color: {colors['accent']}; }}
+        switch.launcher-compact-switch slider {{ min-width: 14px; min-height: 14px; margin: 1px;
+            background: {colors['foreground']}; border: none; box-shadow: none; }}
+        switch.launcher-compact-switch:checked slider {{ background: {colors['background']}; }}
+        switch.launcher-compact-switch:disabled {{ opacity: 0.4; }}
         .launcher-menu-item {{
             outline: none;
             background: transparent;
@@ -1521,6 +2090,48 @@ class Launcher(Gtk.Application):
         .launcher-card button.launcher-tile-menu {{ padding: 2px; min-width: 0; min-height: 0; opacity: 0.55; }}
         .launcher-tile:selected button.launcher-tile-menu, .launcher-tile:hover button.launcher-tile-menu {{ opacity: 1; }}
         .launcher-tile .launcher-run-dot {{ min-width: 10px; min-height: 10px; }}
+        /* Folder layout: a group as a box of icons, the name under it. */
+        .launcher-grid flowboxchild.launcher-folder {{
+            background: transparent; border: none; padding: 4px 4px 6px 4px; border-radius: {radius}px;
+        }}
+        .launcher-folder-icons {{
+            background: alpha({colors['foreground']}, 0.06);
+            border: 1px solid alpha({colors['foreground']}, 0.10);
+            border-radius: {radius}px; padding: 10px 6px;
+        }}
+        .launcher-folder-scroller {{ background: transparent; }}
+        .launcher-grid flowboxchild.launcher-folder.launcher-folder-drop .launcher-folder-icons {{
+            background: alpha({colors['accent']}, 0.30); border-color: {colors['accent']}; border-style: dashed;
+        }}
+        .launcher-filter-entry {{ min-height: 30px; border-radius: 999px; padding: 0 10px; font-size: 13px;
+            background: alpha({colors['foreground']}, 0.06); border: 1px solid alpha({colors['foreground']}, 0.14); }}
+        .launcher-filter-entry:focus-within {{ border-color: {colors['accent']}; }}
+        .launcher-grid flowboxchild.launcher-folder:hover .launcher-folder-icons {{ border-color: alpha({colors['accent']}, 0.55); }}
+        .launcher-grid flowboxchild.launcher-folder:selected {{ background: transparent; }}
+        .launcher-grid flowboxchild.launcher-folder:selected .launcher-folder-icons {{
+            background: alpha({colors['accent']}, 0.16); border-color: {colors['accent']};
+        }}
+        .launcher-card button.launcher-folder-app {{ padding: 6px; min-width: 0; min-height: 0; border-radius: {radius}px; }}
+        .launcher-card button.launcher-folder-app:hover {{ background: alpha({colors['foreground']}, 0.10); }}
+        .launcher-card .launcher-update-badge {{ border-color: alpha({colors['accent']}, 0.6); }}
+        .launcher-update-badge label, .launcher-update-badge image {{ color: {colors['accent']}; }}
+        /* Where a dragged group or icon will land: a bar before or after. */
+        .launcher-drop-marker {{ background: {colors['accent']}; border-radius: 999px;
+            box-shadow: 0 0 6px alpha({colors['accent']}, 0.8); }}
+        .launcher-new-star-inline {{ color: {colors['yellow']}; font-size: 12px; }}
+        .launcher-new-star {{ color: {colors['yellow']}; font-size: 14px; margin: -4px 0 0 -3px;
+            text-shadow: 0 0 2px {colors['background']}, 0 0 2px {colors['background']}; }}
+        .launcher-folder-hidden-icon {{ opacity: 0.4; filter: grayscale(1); }}
+        .launcher-card button.launcher-folder-hidden {{ border: 1px dashed alpha({colors['foreground']}, 0.45); }}
+        .launcher-folder-hidden-mark {{
+            color: {colors['foreground']}; background: alpha({colors['background']}, 0.9);
+            border-radius: 999px; padding: 2px; margin: -2px;
+        }}
+        .launcher-update-dot {{
+            min-width: 10px; min-height: 10px; border-radius: 999px;
+            background: {colors['accent']}; border: 2px solid {colors['background']};
+        }}
+        .launcher-folder-name {{ font-size: 12px; font-weight: 600; }}
         /* Filter bar under the overview. */
         .launcher-filter-bar {{ padding-top: 8px; border-top: 1px solid alpha({colors['foreground']}, 0.12); }}
         .launcher-card button.launcher-filter-mode {{ padding: 3px 12px; min-height: 0; border-radius: 0; font-size: 12px; }}
@@ -1651,12 +2262,16 @@ class Launcher(Gtk.Application):
         self.style_provider = provider
 
     def open(self):
+        # A drag that never reported its end must not hold refreshes back.
+        self.tile_dragging, self.dragged_app, self.dragged_group = False, None, None
+        self.refresh_after_drag = None
         self.shortcut_state = shortcuts.load_state()
         self.prune_uninstalled_shortcuts()
         self.update_dead_binds_question()
         self.list_bindings = None
         try:
             self.apps = parse_desktop_files()
+            self.prepare_entries(self.apps, "apps")
         except Exception as e:
             print("Error parsing desktop files:", e, file=sys.stderr)
         try:
@@ -1677,9 +2292,15 @@ class Launcher(Gtk.Application):
         except Exception as e:
             print("Error refreshing list:", e, file=sys.stderr)
         self.window.present()
+        self.tell_dock(True)
+        # The dock shows itself now: fit the hole to it once it has, then follow it.
+        GLib.timeout_add(250, self.update_input_region)
+        if self.dock_space() and not getattr(self, "dock_follow_source", 0):
+            self.dock_follow_source = GLib.timeout_add(1000, self.follow_dock)
         self.layer_watch.start()
         if self.mode == "apps":
             self.prefetch_plugins()
+        self.check_updates()
         # Restarted after a language change: back to where the user was.
         if os.environ.pop("SIMPLE_LAUNCHER_PAGE", "") == "settings":
             GLib.idle_add(self.open_settings_page)
@@ -1704,6 +2325,7 @@ class Launcher(Gtk.Application):
 
     def hide(self):
         self.layer_watch.stop()
+        self.tell_dock(False)
         if self.actions_menu_open():
             self.actions_popover.popdown()
         if self.aux_page_open():
@@ -1782,6 +2404,7 @@ class Launcher(Gtk.Application):
         selected = self.row_key(row) if row is not None else None
         try:
             self.apps = parse_desktop_files()
+            self.prepare_entries(self.apps, "apps")
             if self.mode == "plugins":
                 self.load_plugins()
             self.prune_uninstalled_shortcuts()
@@ -1868,8 +2491,25 @@ class Launcher(Gtk.Application):
         # Just opened a website from the details page: the browser has the focus.
         if time.monotonic() < getattr(self, "keep_open_until", 0):
             return GLib.SOURCE_REMOVE
-        if self.window and self.window.get_visible() and not self.window.is_active():
+        if not (self.window and self.window.get_visible() and not self.window.is_active()):
+            return GLib.SOURCE_REMOVE
+        rect = getattr(self, "dock_screen_rect", None)
+        if rect is None:
             self.hide()
+            return GLib.SOURCE_REMOVE
+        # The pointer may have gone over the dock (focus follows the mouse):
+        # then stay open; back over the popup, it gets the keyboard again.
+        # Asked on a thread, never blocking the popup.
+
+        def work():
+            over = dock_core.inside(dock_core.hyprctl_json("cursorpos"), rect)
+            GLib.idle_add(decide, over)
+
+        def decide(over):
+            if not over and self.window.get_visible() and not self.window.is_active():
+                self.hide()
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
         return GLib.SOURCE_REMOVE
 
     def select_row(self, row):
@@ -1890,6 +2530,12 @@ class Launcher(Gtk.Application):
                 self.close_aux_page()
                 return True
             return False
+        if page == "icon":
+            # Backspace edits the search field: only Esc goes back.
+            if key == Gdk.KEY_Escape:
+                self.close_aux_page()
+                return True
+            return False
         if page == "groupname":
             if key == Gdk.KEY_Escape:
                 self.close_aux_page()
@@ -1903,11 +2549,7 @@ class Launcher(Gtk.Application):
             if self.actions_menu_open():
                 self.actions_popover.popdown()
                 return True
-            if self.search_query:
-                self.search_query = ""
-                self.refresh_list()
-            else:
-                self.hide()
+            self.on_escape()
             return True
 
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
@@ -1918,11 +2560,14 @@ class Launcher(Gtk.Application):
             if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
                 tile = self.selected_item()
                 if tile is not None:
-                    self.launch(tile.app, tile.actions_button)
+                    self.activate_tile(tile)
                 return True
             if key == Gdk.KEY_Menu:
                 tile = self.selected_item()
-                if tile is not None:
+                if hasattr(tile, "group"):
+                    if tile.group not in (groups.RUNNING, groups.OTHER):
+                        self.show_group_actions(tile.actions_button, tile.group)
+                elif tile is not None:
                     self.show_actions(tile.actions_button, tile.app)
                 return True
             if not ctrl and self.overview_key(key, state):
@@ -2019,6 +2664,9 @@ class Launcher(Gtk.Application):
                 self.search_query = self.search_query[:-1]
                 self.refresh_list()
                 return True
+            if self.open_folder():
+                self.leave_folder()
+                return True
             return False
 
         has_modifier = bool(state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.ALT_MASK | Gdk.ModifierType.SUPER_MASK))
@@ -2041,11 +2689,42 @@ class Launcher(Gtk.Application):
             # Tray icons come and go with their apps (Steam started, NordVPN quit).
             if self.mode == "plugins" and not menu_open and self.shortcut_app is None and self.tray_changed():
                 self.reload_apps()
-            elif not menu_open and self.refresh_running():
-                self.refresh_list()
+            elif not menu_open:
+                self.refresh_running_async()
             if self.theme.reload():
                 self.apply_theme()
         return GLib.SOURCE_CONTINUE
+
+    def refresh_running_async(self):
+        """The poll's window and process scan on a thread; the list is
+        rebuilt on the main loop when something changed."""
+        if getattr(self, "running_scan", False):
+            return
+        self.running_scan = True
+
+        def work():
+            clients = None
+            try:
+                result = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    clients = json.loads(result.stdout)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            names = background_process_names()
+            GLib.idle_add(done, clients, names)
+
+        def done(clients, names):
+            self.running_scan = False
+            previous = (self.clients, self.process_names)
+            if clients is not None:
+                self.clients = clients
+            self.process_names = names
+            self.window_children = {}
+            menu_open = self.actions_menu_open() or getattr(self, "tile_dragging", False)
+            if previous != (self.clients, self.process_names) and not menu_open and self.window.is_visible():
+                self.refresh_list()
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
 
     def refresh_running(self):
         previous = (self.clients, self.process_names)
@@ -2113,7 +2792,14 @@ class Launcher(Gtk.Application):
         return bool(process_pids(name) - claimed)
 
     def refresh_list(self, selected_id=None):
+        if getattr(self, "tile_dragging", False) or getattr(self, "dragged_group", None) is not None:
+            # Rebuilding now would destroy the dragged widget and the drop
+            # targets, and GTK cancels the drag: refresh once it has ended.
+            self.refresh_after_drag = (selected_id,) if selected_id is not None else \
+                getattr(self, "refresh_after_drag", None) or (None,)
+            return
         self.update_title()
+        self.sync_filter_entry()
         if any(self.app_state(app) != "stopped" for app in self.apps):
             self.running_button.add_css_class("any-running")
         else:
@@ -2264,6 +2950,11 @@ class Launcher(Gtk.Application):
             badge_lbl = Gtk.Label(label=badge_text)
             badge.append(badge_lbl)
             title_row.append(badge)
+        if self.is_new(app):
+            title_row.append(self.new_star())
+        note = self.update_note(app)
+        if note:
+            title_row.append(self.update_badge(note))
 
         text_box.append(title_row)
 
@@ -2309,6 +3000,14 @@ class Launcher(Gtk.Application):
                 self.select_row(target_row)
         motion.connect("enter", on_enter)
         row.add_controller(motion)
+        if "tray_id" not in app:
+            # Drag a row onto the dock to pin it there.
+            drag = Gtk.DragSource(actions=Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+            drag.connect("prepare", lambda *_a, a=app: Gdk.ContentProvider.new_for_value(
+                DRAG_PREFIX + a["desktop_id"]))
+            drag.connect("drag-begin", lambda source, _d, i=icon, a=app: self.on_tile_drag_begin(source, i, a))
+            drag.connect("drag-end", lambda *_a: self.on_tile_drag_end())
+            row.add_controller(drag)
         return row
 
     def grouping_running(self):
@@ -2469,6 +3168,8 @@ class Launcher(Gtk.Application):
 
     def launch(self, app, button=None):
         """Open an app, a shell plugin or a tray icon, and close the launcher."""
+        if app.get("desktop_id") and newapps.opened(self.seen, app["desktop_id"]):
+            self.save_seen()  # Opened once: no longer marked new.
         if "tray_id" in app:
             # Activate like a click on the icon; Steam's icon has no such action,
             # so open its app instead. A menu-only icon (NordVPN) shows its menu.
@@ -2646,6 +3347,13 @@ class Launcher(Gtk.Application):
                            (launch_action(app, action_id), self.hide()), "system-run-symbolic",
                            shortcut=chip_for(action["id"]))
 
+        if app.get("plugin_id") and self.updates["plugins"].get(app["plugin_id"]):
+            # Straight away, in the background: fast-forward only, validated, rolled back on failure.
+            add_action(_("Update"), lambda: self.update_plugin(app), "software-update-available-symbolic")
+        elif app.get("desktop_path") and self.updates["apps"].get(app["desktop_path"]):
+            # A package is never updated on its own on Arch (partial upgrades break
+            # things): Omarchy's system update, as from the bar's update icon.
+            add_action(_("Update system…"), self.update_system, "software-update-available-symbolic")
         # A shortcut needs something to open: not a widget that is only a bar part.
         if app.get("self_launcher") or app.get("openable", True):
             if not app.get("self_launcher"):
@@ -2659,6 +3367,13 @@ class Launcher(Gtk.Application):
                        lambda: self.fill_group_choice(popover, app), "folder-symbolic",
                        keep_open=True, end_icon="go-next-symbolic")
             add_action(_("Details…"), lambda: self.open_details_page(app), "dialog-information-symbolic")
+            add_action(_("Change icon…"), lambda: self.open_icon_page(app), "image-x-generic-symbolic")
+            dock = dock_core.settings()
+            if dock["dock_enabled"] and "plugin_id" not in app:
+                if app["desktop_id"] in dock["dock_pinned"]:
+                    add_action(_("Unpin from dock"), lambda: dock_core.unpin(app["desktop_id"]), "view-pin-symbolic")
+                else:
+                    add_action(_("Pin to dock"), lambda: dock_core.pin(app["desktop_id"]), "view-pin-symbolic")
             add_separator()
         hidden = app["desktop_id"] in self.hidden_by_mode["plugins" if is_widget(app) else "apps"]
         # Out of the bar, a widget is hidden by that already: Hide would do nothing.
@@ -2946,9 +3661,16 @@ class Launcher(Gtk.Application):
         popover.set_child(box)
         self.focus_first_entry(box, focus)
 
-    def put_in_group(self, app, gid):
+    def group_member_ids(self, gid):
+        """The ids of group gid's entries in the order they show."""
+        entries = self.plugins if self.mode == "plugins" else self.apps
+        members = dict(groups.sections(entries, self.groups)).get(gid, [])
+        return [a["desktop_id"] for a in members]
+
+    def put_in_group(self, app, gid, target_id=None, after=False):
+        """Into group gid, at the end or next to target_id (dropped on it)."""
         try:
-            groups.assign(self.groups, app["desktop_id"], gid)
+            groups.place(self.groups, app["desktop_id"], gid, target_id, self.group_member_ids(gid), after)
         except ValueError:
             return
         self.save_groups()
@@ -3306,9 +4028,9 @@ class Launcher(Gtk.Application):
         grid = Gtk.Grid(column_spacing=10, row_spacing=10)
 
         def label(text, tooltip=None):
-            widget = Gtk.Label(label=text, xalign=0)
+            widget = Gtk.Label(label=text, xalign=0, wrap=True, max_width_chars=1)
             widget.add_css_class("launcher-setting-label")
-            widget.set_size_request(150, -1)
+            widget.set_size_request(165, -1)  # Long names (translations) wrap instead of widening the card.
             if tooltip:
                 widget.set_tooltip_text(tooltip)
             return widget
@@ -3333,10 +4055,365 @@ class Launcher(Gtk.Application):
         admin_switch.connect("notify::active", self.on_admin_action_toggled)
         grid.attach(label(_("Open as administrator"), admin_tip), 0, 1, 1, 1)
         grid.attach(admin_switch, 1, 1, 1, 1)
-        page.append(grid)
+        layout_tip = _("How the popup shows the entries once it is resized to two columns or more: each group as a folder of icons (the default), or every entry as a card.")
+        layout_dropdown = Gtk.DropDown.new_from_strings([_("Folders"), _("Cards")])
+        layout_dropdown.add_css_class("launcher-compact-dropdown")
+        layout_dropdown.set_halign(Gtk.Align.START)
+        layout_dropdown.set_valign(Gtk.Align.CENTER)
+        layout_dropdown.set_tooltip_text(layout_tip)
+        layout_dropdown.set_selected(0 if self.wide_layout == "folders" else 1)
+        layout_dropdown.connect("notify::selected", lambda d, _p: getattr(self, "layout_syncing", False)
+                                or self.set_wide_layout("folders" if d.get_selected() == 0 else "cards"))
+        grid.attach(label(_("Layout when wide"), layout_tip), 0, 3, 1, 1)  # After the small one.
+        grid.attach(layout_dropdown, 1, 3, 1, 1)
+        self.layout_dropdown = layout_dropdown
+        small_tip = _("How the small popup shows the entries: as one list (the default), in groups, or by origin.")
+        self.small_views = ("list", "groups", "origin")
+        small_dropdown = Gtk.DropDown.new_from_strings([_("List"), _("Groups"), _("By origin")])
+        small_dropdown.add_css_class("launcher-compact-dropdown")
+        small_dropdown.set_halign(Gtk.Align.START)
+        small_dropdown.set_valign(Gtk.Align.CENTER)
+        small_dropdown.set_tooltip_text(small_tip)
+        small_dropdown.set_selected(self.small_views.index(self.view))
+        small_dropdown.connect("notify::selected", lambda d, _p: getattr(self, "view_syncing", False)
+                               or self.toggle_view(self.small_views[d.get_selected()]))
+        grid.attach(label(_("Layout when small"), small_tip), 0, 2, 1, 1)
+        grid.attach(small_dropdown, 1, 2, 1, 1)
+        self.small_dropdown = small_dropdown
+        views_tip = _("Buttons in the small popup's header to switch between groups, list and origin (Ctrl+G does the same).")
+        views_switch = Gtk.Switch(active=self.view_buttons_on, halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        views_switch.add_css_class("launcher-compact-switch")
+        views_switch.set_tooltip_text(views_tip)
+        views_switch.connect("notify::active", lambda sw, _p: self.set_view_buttons(sw.get_active()))
+        grid.attach(label(_("View buttons when small"), views_tip), 0, 4, 1, 1)
+        grid.attach(views_switch, 1, 4, 1, 1)
+        self.views_switch = views_switch
+        # What Layout and View buttons do, animated.
+        layout_sketch = previews.LayoutSketch(lambda: self.theme.colors,
+                                              lambda: (self.wide_layout, self.view_buttons_on))
+        layout_sketch.set_tooltip_text(_("Preview: the small list, then resized wide."))
+        dock_grid = Gtk.Grid(column_spacing=10, row_spacing=10)
+        self.build_dock_settings(dock_grid, label, 0)
+        # Each group of options in a card, its animated preview to the right
+        # of the card (wide popup) or a hint under it (small popup).
+        sections = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        sections.append(self.settings_section(grid, layout_sketch, self.reset_general_settings))
+        sections.append(self.dock_heading)
+        sections.append(self.settings_section(dock_grid, self.dock_sketch, self.reset_dock_settings))
+        # The options grew taller than the popup: they scroll.
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        sections.set_margin_end(6)
+        scroller.set_child(sections)
+        page.append(scroller)
         self.admin_switch = admin_switch
         self.language_dropdown = dropdown
         self.stack.add_named(page, "settings")
+
+    def build_dock_settings(self, grid, label, row):
+        """The DOCK group: on/off, edge, auto-hide, length, corners."""
+        heading = Gtk.Label(label=_("Dock").upper(), xalign=0)
+        heading.add_css_class("launcher-section-title")
+        heading.set_margin_top(8)
+        self.dock_heading = heading  # Placed above the dock card by the caller.
+        dock = dock_core.settings()
+        self.dock_cache, self.bar_cache = dock, dock_core.bar_position()
+        self.dock_controls = []
+        self.dock_switches = {}
+
+        def switch(key, text, tip, line):
+            widget = Gtk.Switch(active=dock[key], halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+            widget.add_css_class("launcher-compact-switch")
+            widget.set_tooltip_text(tip)
+            widget.connect("notify::active", lambda sw, _p: self.set_dock_setting(key, sw.get_active()))
+            grid.attach(label(text, tip), 0, line, 1, 1)
+            grid.attach(widget, 1, line, 1, 1)
+            self.dock_switches[key] = widget
+            return widget
+
+        show_tip = _("A dock with your pinned apps and the running ones along a screen edge. Pin apps with “Pin to dock” in their menu.")
+        switch("dock_enabled", _("Show dock"), show_tip, row + 1)
+        position_tip = _("The screen edge the dock sits on. The bar's edge is left out: the dock never covers the bar.")
+        positions = Gtk.DropDown.new_from_strings([""])
+        positions.add_css_class("launcher-compact-dropdown")
+        positions.set_halign(Gtk.Align.START)
+        positions.set_valign(Gtk.Align.CENTER)
+        positions.set_tooltip_text(position_tip)
+        positions.connect("notify::selected", lambda d, _p: getattr(self, "dock_syncing", False) or self.set_dock_setting(
+            "dock_position", self.dock_position_choices[d.get_selected()]))
+        grid.attach(label(_("Position"), position_tip), 0, row + 2, 1, 1)
+        grid.attach(positions, 1, row + 2, 1, 1)
+        align_tip = _("Where the icons sit in a full-length dock. A compact dock is always centred.")
+        aligns = Gtk.DropDown.new_from_strings([""])
+        aligns.add_css_class("launcher-compact-dropdown")
+        aligns.set_halign(Gtk.Align.START)
+        aligns.set_valign(Gtk.Align.CENTER)
+        aligns.set_tooltip_text(align_tip)
+        aligns.connect("notify::selected", lambda d, _p: getattr(self, "dock_syncing", False) or self.set_dock_setting(
+            "dock_align", dock_core.ALIGNS[d.get_selected()]))
+        grid.attach(label(_("Icons"), align_tip), 0, row + 7, 1, 1)
+        grid.attach(aligns, 1, row + 7, 1, 1)
+        self.dock_aligns = aligns
+
+        def choice(key, text, tip, values, names, line):
+            widget = Gtk.DropDown.new_from_strings(names)
+            widget.add_css_class("launcher-compact-dropdown")
+            widget.set_halign(Gtk.Align.START)
+            widget.set_valign(Gtk.Align.CENTER)
+            widget.set_tooltip_text(tip)
+            widget.set_selected(values.index(dock[key]))
+            widget.connect("notify::selected", lambda d, _p: getattr(self, "dock_syncing", False)
+                           or self.set_dock_setting(key, values[d.get_selected()]))
+            grid.attach(label(text, tip), 0, line, 1, 1)
+            grid.attach(widget, 1, line, 1, 1)
+            self.dock_choices[key] = (widget, values)
+
+        self.dock_choices = {}
+        px = lambda values: [f"{v} px" for v in values]
+        choice("dock_height", _("Dock height"), _("How high the dock's background is."),
+               dock_core.HEIGHTS, px(dock_core.HEIGHTS), row + 8)
+        choice("dock_icon_size", _("Icon size"),
+               _("Icons larger than the dock stick out of it, as on macOS."),
+               dock_core.ICON_SIZES, px(dock_core.ICON_SIZES), row + 9)
+        choice("dock_spacing", _("Icon spacing"), _("The gap between two icons in the dock."),
+               dock_core.SPACINGS, px(dock_core.SPACINGS), row + 10)
+        choice("dock_magnify", _("Grow on hover"),
+               _("The icon under the pointer grows, its neighbours halfway, as on macOS."),
+               dock_core.MAGNIFY, [_("Off")] + [f"{v} %" for v in dock_core.MAGNIFY[1:]], row + 11)
+        switch("dock_bounce", _("Bounce on alerts"),
+               _("An app that wants attention bounces in the dock until you switch to it."), row + 12)
+        switch("dock_indicator_shown", _("Show indicator"),
+               _("Mark running apps in the dock (style and colour below)."), row + 13)
+        choice("dock_indicator", _("Indicator"),
+               _("How running apps are marked: a dot or a line next to the icon. The focused app's mark is larger."),
+               dock_core.INDICATORS, [_("Dot"), _("Line")], row + 14)  # Line: the default.
+        choice("dock_indicator_color", _("Indicator colour"),
+               _("The colour of the running marks; Theme uses the theme's accent colour."),
+               dock_core.INDICATOR_COLORS, [_("Theme"), _("Light"), _("Red"), _("Yellow"), _("Green"), _("Orange")],
+               row + 15)
+        self.dock_positions = positions
+        self.dock_controls += [
+            positions,
+            switch("dock_autohide", _("Auto-hide"),
+                   _("Hidden until the pointer touches the screen edge. Off: the dock keeps its space and windows stay clear of it."),
+                   row + 3),
+            switch("dock_full_width", _("Full length"),
+                   _("Along the whole screen edge; off: only as long as its icons."), row + 4),
+            switch("dock_rounded", _("Rounded corners"), _("Round corners, like the windows."), row + 5),
+            switch("dock_transparent", _("Transparent"),
+                   _("No background, only the icons. Double-click the dock's background to switch, as on the bar."),
+                   row + 6),
+        ]
+        # What the dock options do, animated, right beneath its options.
+        sketch = previews.DockSketch(lambda: self.theme.colors, lambda: self.dock_cache, lambda: self.bar_cache)
+        sketch.set_tooltip_text(_("Preview: the dock as set, with the bar and two windows."))
+        self.dock_sketch = sketch
+        self.sync_dock_settings()
+
+
+    def settings_section(self, grid, sketch, reset=None):
+        """[card with the options | animated preview], and the hint about the
+        preview under the card while the popup is small."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        card.add_css_class("launcher-settings-card")
+        card.set_size_request(SETTINGS_CARD_WIDTH, -1)  # Both cards alike.
+        card.set_halign(Gtk.Align.START)
+        card.set_valign(Gtk.Align.FILL)
+        card.append(grid)
+        if reset is not None:
+            button = Gtk.Button(label=_("Reset to defaults"))
+            button.add_css_class("sc-small")
+            button.set_halign(Gtk.Align.END)
+            button.set_margin_top(12)
+            button.connect("clicked", lambda *_a: reset())
+            card.append(button)
+        hint = Gtk.Label(label=_("Make the popup wider to see an animated preview of these options."),
+                         xalign=0, wrap=True, max_width_chars=40)
+        hint.add_css_class("launcher-settings-hint")
+        hint.set_margin_top(10)
+        card.append(hint)
+        # The preview in a card of its own, as wide and as high as the options card.
+        frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        frame.add_css_class("launcher-settings-card")
+        frame.set_size_request(SETTINGS_CARD_WIDTH, -1)
+        frame.set_valign(Gtk.Align.FILL)
+        sketch.set_halign(Gtk.Align.CENTER)
+        sketch.set_valign(Gtk.Align.CENTER)
+        sketch.set_vexpand(True)
+        frame.append(sketch)
+        frame.set_vexpand(False)  # The sketch fills its card, not the whole page.
+        row = Gtk.Box(spacing=16)
+        row.set_vexpand(False)
+        row.set_halign(Gtk.Align.START)
+        row.append(card)
+        row.append(frame)
+        self.preview_slots = getattr(self, "preview_slots", []) + [(frame, hint)]
+        self.sync_previews()
+        return row
+
+    def reset_general_settings(self):
+        """Language: the system's; Open as administrator: off; layouts:
+        folders when wide, the list when small. A new language restarts the
+        popup (on this page), so it comes last."""
+        if self.admin_switch.get_active():
+            self.admin_switch.set_active(False)  # Its handler switches the action off properly.
+        self.set_wide_layout("folders")
+        self.toggle_view("list")
+        if i18n.language_setting() != "auto":
+            self.language_dropdown.set_selected(0)  # "System (…)": saves and restarts.
+
+    def reset_dock_settings(self):
+        """Back to the dock defaults (off); the pinned apps stay."""
+        try:
+            dock_core.reset()
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+            return
+        self.dock_cache = dock_core.settings()
+        self.sync_dock_settings()
+        self.resize_to(self.card_w, self.list_h)
+        self.move_to(self.position)
+        self.update_input_region()
+        self.tell_dock(True)
+
+    def sync_previews(self):
+        wide = getattr(self, "overview", False)
+        for sketch, hint in getattr(self, "preview_slots", []):
+            sketch.set_visible(wide)
+            hint.set_visible(not wide)
+
+    def sync_dock_settings(self):
+        """The dock changes some settings itself (a double-click on it, Pin):
+        show the saved values whenever the settings page opens."""
+        dock = dock_core.settings()
+        self.dock_cache, self.bar_cache = dock, dock_core.bar_position()
+        for key, widget in getattr(self, "dock_switches", {}).items():
+            if widget.get_active() != dock[key]:
+                widget.set_active(dock[key])
+        self.dock_syncing = True
+        for key, (widget, values) in getattr(self, "dock_choices", {}).items():
+            if widget.get_selected() != values.index(dock[key]):
+                widget.set_selected(values.index(dock[key]))
+        self.dock_syncing = False
+        positions = getattr(self, "dock_positions", None)
+        if positions is None:
+            return
+        # The edges the dock can use: all but the bar's one.
+        bar = dock_core.bar_position()
+        edge = dock_core.edge(dock, bar)
+        names = {"bottom": _("Bottom"), "top": _("Top"), "left": _("Left"), "right": _("Right")}
+        self.dock_syncing = True
+        choices = [p for p in dock_core.POSITIONS if p != bar]
+        # New lists only when their entries change (the bar moved, the edge
+        # turned from horizontal to vertical): a new model resets the selection.
+        if choices != getattr(self, "dock_position_choices", None):
+            self.dock_position_choices = choices
+            positions.set_model(Gtk.StringList.new([names[p] for p in choices]))
+        if positions.get_selected() != choices.index(edge):
+            positions.set_selected(choices.index(edge))
+        ends = (_("Top"), _("Bottom")) if edge in ("left", "right") else (_("Left"), _("Right"))
+        align_names = [ends[0], _("Center"), ends[1]]
+        if align_names != getattr(self, "dock_align_names", None):
+            self.dock_align_names = align_names
+            self.dock_aligns.set_model(Gtk.StringList.new(align_names))
+        if self.dock_aligns.get_selected() != dock_core.ALIGNS.index(dock["dock_align"]):
+            self.dock_aligns.set_selected(dock_core.ALIGNS.index(dock["dock_align"]))
+        self.dock_syncing = False
+
+    def set_dock_setting(self, key, value):
+        # Unchanged (a dropdown re-reporting its own refill): nothing to do.
+        # This also breaks any notify → save → refill → notify cycle.
+        if getattr(self, "dock_cache", {}).get(key) == value:
+            return
+        try:
+            dock_core.set_setting(key, value)
+        except (OSError, KeyError, ValueError) as error:
+            self.notify(_("Could not save the setting"), str(error))
+            return
+        self.dock_cache = dock_core.settings()  # The preview follows at once.
+        if key == "dock_enabled" and value:
+            self.start_dock()
+        if key == "dock_position":
+            # The alignment names follow the edge (left/right or top/bottom).
+            # Later, never inside the dropdown's own change handler.
+            GLib.idle_add(lambda: self.sync_dock_settings() and False)
+        if key in ("dock_enabled", "dock_autohide", "dock_position", "dock_height", "dock_icon_size",
+                   "dock_magnify", "dock_bounce"):  # (Indicator settings only change how the dock looks.)
+            # The card makes room for the dock (or takes it back) at once.
+            self.resize_to(self.card_w, self.list_h)
+            self.move_to(self.position)
+            self.update_input_region()
+            self.tell_dock(True)
+            # Off: the dock sees the setting and quits by itself.
+
+    def update_input_region(self):
+        """Leave the dock's own rectangle out of this full-screen popup's
+        input, so clicks and drags reach the dock under it. Where the dock is
+        comes from hyprctl, asked on a thread: a slow answer must never stall
+        this popup (its transparent layer would block the whole desktop)."""
+        if self.window is None or getattr(self, "dock_lookup_running", False):
+            return GLib.SOURCE_REMOVE
+        if not self.dock_space():
+            self.dock_screen_rect = None
+            self.apply_input_region(None)
+            return GLib.SOURCE_REMOVE
+        self.dock_lookup_running = True
+
+        def work():
+            found = dock_core.dock_rect(dock_core.hyprctl_json("layers"), dock_core.hyprctl_json("monitors"))
+            GLib.idle_add(done, found)
+
+        def done(found):
+            self.dock_lookup_running = False
+            self.dock_screen_rect = found[0] if found else None
+            self.apply_input_region(found)
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
+        return GLib.SOURCE_REMOVE
+
+    def apply_input_region(self, found):
+        surface = self.window.get_surface() if self.window is not None else None
+        if surface is None:
+            return
+        width, height = self.full_screen_size()
+        region = cairo.Region(cairo.RectangleInt(0, 0, width, height))
+        if found:
+            # Only the dock itself: beside it, the popup still takes the pointer
+            # (a click there closes it, moving there does not).
+            (x, y, w, h), (ox, oy) = found
+            region.subtract(cairo.RectangleInt(x - ox, y - oy, w, h))
+        surface.set_input_region(region)
+
+    def follow_dock(self):
+        """While open: the dock may grow (shown, items added); keep its hole fitting."""
+        if self.window is None or not self.window.get_visible():
+            self.dock_follow_source = 0
+            return GLib.SOURCE_REMOVE
+        self.update_input_region()
+        return GLib.SOURCE_CONTINUE
+
+    @staticmethod
+    def tell_dock(popup_open):
+        """Keep an auto-hiding dock shown while this popup is open: the
+        popup's full-screen overlay keeps the pointer from the dock's edge."""
+        try:
+            if not dock_core.settings()["dock_enabled"]:
+                return
+            bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            group = Gio.DBusActionGroup.get(bus, "org.omarchy.appmanager.dock", "/org/omarchy/appmanager/dock")
+            group.activate_action("popup-open", GLib.Variant.new_boolean(popup_open))
+        except GLib.Error:
+            pass  # No dock running.
+
+    @staticmethod
+    def start_dock():
+        """Start the dock (a running one just re-reads its settings)."""
+        try:
+            subprocess.Popen([sys.executable, str(PLUGIN_DIR / "dock.py")], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as error:
+            print("Could not start the dock:", error, file=sys.stderr)
 
     def on_language_selected(self, dropdown, _param):
         code = self.language_codes[dropdown.get_selected()]
@@ -3406,6 +4483,7 @@ class Launcher(Gtk.Application):
         return self.stack.get_visible_child_name() == "settings"
 
     def open_settings_page(self):
+        self.sync_dock_settings()
         if self.shortcut_app is not None:
             self.close_shortcut_page(focus_list=False)
         self.back_chip.set_label("· ⌫")
@@ -3450,15 +4528,33 @@ class Launcher(Gtk.Application):
         self.back_button.set_visible(False)
         for button in (self.hidden_button, self.mode_button, self.settings_button):
             button.set_visible(True)
-        self.view_button.set_visible(not self.overview)
+        self.view_button.set_visible(not self.overview and self.view_buttons_on)
         self.filter_bar.set_visible(self.overview)
         self.mouse_hint.set_visible(True)
         self.title.set_hexpand(False)  # The hint takes the free room.
         self.update_mouse_hint()
         self.running_button.set_visible(self.mode == "apps")
 
+    def sync_small_dropdown(self):
+        dropdown = getattr(self, "small_dropdown", None)
+        if dropdown is not None and dropdown.get_selected() != self.small_views.index(self.view):
+            self.view_syncing = True
+            dropdown.set_selected(self.small_views.index(self.view))
+            self.view_syncing = False
+        return GLib.SOURCE_REMOVE
+
+    def set_view_buttons(self, shown):
+        if shown == self.view_buttons_on:
+            return
+        self.view_buttons_on = shown
+        try:
+            set_view_buttons_shown(shown)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+
     def toggle_view(self, view=None):
         """Switch to view ("list", "groups" or "origin"), or to the next one."""
+        GLib.idle_add(self.sync_small_dropdown)  # Settings shows it too (after this handler).
         if self.actions_menu_open():
             self.actions_popover.popdown()
         order = ("list", "groups", "origin")
@@ -3477,7 +4573,7 @@ class Launcher(Gtk.Application):
     # --- group name and details pages ------------------------------------------
 
     def aux_page_open(self):
-        return self.stack.get_visible_child_name() in ("groupname", "details")
+        return self.stack.get_visible_child_name() in ("groupname", "details", "icon")
 
     def open_aux_page(self, name, title, backspace_goes_back):
         if self.actions_menu_open():
@@ -3651,6 +4747,182 @@ class Launcher(Gtk.Application):
         page.set_child(box)
         self.details_icon_slot, self.details_name, self.details_desc, self.details_grid = icon_slot, name, desc, grid
         self.stack.add_named(page, "details")
+
+    def build_icon_page(self):
+        """Change icon…: icons found online (two open icon collections) and
+        in the installed icon themes; a click applies one, in every view."""
+        page = Gtk.ScrolledWindow()
+        page.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.EXTERNAL)
+        page.set_min_content_height(LIST_HEIGHT)
+        page.set_max_content_height(LIST_HEIGHT)
+        self.height_pages.append(page)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        rule = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        rule.add_css_class("launcher-settings-rule")
+        box.append(rule)
+        top = Gtk.Box(spacing=12)
+        self.icon_current = Gtk.Box()
+        top.append(self.icon_current)
+        self.icon_name_label = Gtk.Label(xalign=0, hexpand=True)
+        self.icon_name_label.add_css_class("launcher-details-name")
+        self.icon_name_label.set_ellipsize(3)
+        self.icon_name_label.set_max_width_chars(1)
+        top.append(self.icon_name_label)
+        reset = Gtk.Button(label=_("Reset to default"))
+        reset.add_css_class("sc-small")
+        reset.set_valign(Gtk.Align.CENTER)
+        reset.connect("clicked", lambda *_a: self.choose_icon(None))
+        top.append(reset)
+        self.icon_reset = reset
+        box.append(top)
+        search = Gtk.Box(spacing=6)
+        entry = Gtk.SearchEntry()
+        entry.add_css_class("launcher-filter-entry")
+        entry.set_placeholder_text(_("Search icons"))
+        entry.set_hexpand(True)
+        entry.get_delegate().set_max_length(80)
+        entry.connect("activate", lambda e: self.search_icons(e.get_text()))
+        self.guard_text_field(entry)
+        search.append(entry)
+        go = Gtk.Button(label=_("Search"))
+        go.add_css_class("sc-small")
+        go.connect("clicked", lambda *_a: self.search_icons(entry.get_text()))
+        search.append(go)
+        box.append(search)
+        self.icon_entry = entry
+        self.icon_status = Gtk.Label(xalign=0)
+        self.icon_status.add_css_class("launcher-app-desc")
+        box.append(self.icon_status)
+        self.icon_flows = {}
+        for key, heading in (("online", _("Original icons (online)")), ("theme", _("Installed icons"))):
+            title = Gtk.Label(label=heading.upper(), xalign=0)
+            title.add_css_class("launcher-section-title")
+            box.append(title)
+            flow = Gtk.FlowBox()
+            flow.set_selection_mode(Gtk.SelectionMode.NONE)
+            flow.set_homogeneous(True)
+            flow.set_min_children_per_line(4)
+            flow.set_max_children_per_line(10)
+            flow.set_row_spacing(6)
+            flow.set_column_spacing(6)
+            box.append(flow)
+            self.icon_flows[key] = flow
+        page.set_child(box)
+        self.stack.add_named(page, "icon")
+
+    def open_icon_page(self, app):
+        self.icon_app = app
+        self.icon_name_label.set_label(app["name"])
+        self.show_current_icon()
+        self.icon_entry.set_text(app["name"])
+        self.open_aux_page("icon", _("Icon for {0}").format(app["name"]), backspace_goes_back=False)
+        self.search_icons(app["name"])
+        self.icon_entry.grab_focus()
+
+    def show_current_icon(self):
+        while child := self.icon_current.get_first_child():
+            self.icon_current.remove(child)
+        self.icon_current.append(self.app_icon(self.icon_app, 48))
+        self.icon_reset.set_sensitive(self.icon_app.get("desktop_id") in self.icon_overrides)
+
+    def icon_tile(self, image, caption, choice):
+        button = Gtk.Button()
+        button.add_css_class("flat")
+        button.add_css_class("launcher-folder-app")
+        inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        image.set_pixel_size(40)
+        inner.append(image)
+        label = Gtk.Label(label=caption)
+        label.add_css_class("launcher-app-desc")
+        label.set_ellipsize(3)
+        label.set_max_width_chars(1)
+        label.set_hexpand(True)
+        inner.append(label)
+        button.set_child(inner)
+        button.set_size_request(76, -1)
+        button.set_tooltip_text(caption)
+        button.connect("clicked", lambda *_a: self.choose_icon(choice))
+        return button
+
+    def search_icons(self, query):
+        """Installed theme icons at once; online candidates when they arrive."""
+        app = self.icon_app
+        if app is None:
+            return
+        self.icon_search_token += 1
+        token = self.icon_search_token
+        for flow in self.icon_flows.values():
+            flow.remove_all()
+        command = app.get("cli_command") or app.get("desktop_id", "").split(":")[-1]
+        words = [w for w in icons.slugs_for(query, command) if len(w) >= 3]
+        theme = Gtk.IconTheme.get_for_display(self.window.get_display())
+        names = sorted((n for n in theme.get_icon_names()
+                        if not n.endswith("-symbolic") and any(w in n.casefold() for w in words)),
+                       key=lambda n: (len(n), n))[:30]
+        for name in names:
+            self.icon_flows["theme"].append(self.icon_tile(Gtk.Image.new_from_icon_name(name), name, name))
+        self.icon_status.set_label(_("Searching…"))
+        color = self.theme.colors.get("foreground")
+
+        def work():
+            try:
+                found = icons.find_online(query, command, color)
+            except Exception as error:
+                print("Icon search failed:", error, file=sys.stderr)
+                found = []
+            GLib.idle_add(show, found)
+
+        def show(found):
+            if token != self.icon_search_token or self.stack.get_visible_child_name() != "icon":
+                return GLib.SOURCE_REMOVE
+            if self.icon_tmp is None:
+                self.icon_tmp = Path(tempfile.mkdtemp(prefix="app-manager-icons-"))
+                atexit.register(shutil.rmtree, self.icon_tmp, True)
+            for old in self.icon_tmp.iterdir():  # Candidates of earlier searches.
+                old.unlink(missing_ok=True)
+            shown = 0
+            for index, (collection, slug, data, extension) in enumerate(found):
+                path = self.icon_tmp / f"{token}-{index}{extension}"
+                try:
+                    path.write_bytes(data)
+                except OSError:
+                    continue
+                texture = icon_texture(str(path))  # The same checks as every icon file.
+                if texture is None:
+                    continue
+                self.icon_flows["online"].append(self.icon_tile(
+                    Gtk.Image.new_from_paintable(texture), f"{slug} · {collection}", (data, extension)))
+                shown += 1
+            self.icon_status.set_label(_("Nothing found. Try another name, e.g. the company.")
+                                       if not shown and not names else _("Click an icon to use it."))
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
+
+    def choose_icon(self, choice):
+        """Use choice (a theme icon name, or downloaded (data, extension));
+        None: back to the entry's own icon."""
+        app = self.icon_app
+        if app is None:
+            return
+        key = app["desktop_id"]
+        try:
+            if choice is None:
+                self.icon_overrides.pop(key, None)
+            else:
+                value = icons.store_file(key, *choice) if isinstance(choice, tuple) else choice
+                self.icon_overrides[key] = value
+            icons.save(self.icon_overrides)
+        except OSError as error:
+            self.notify(_("Could not save the icon"), str(error))
+            return
+        for entries in (self.apps, self.plugins):
+            icons.apply(entries, self.icon_overrides)
+        app["icon"] = self.icon_overrides.get(key) or app.get("icon_default", app.get("icon", ""))
+        _icon_cache.clear()  # A stored file may have new content under the same name.
+        self.close_aux_page(refresh=False)
+        self.refresh_list(selected_id=key)
 
     def open_details_page(self, app):
         self.details_token += 1
@@ -4569,6 +5841,7 @@ class Launcher(Gtk.Application):
 
     def load_plugins(self):
         self.tray_seen, self.plugins = self.collect_plugins()
+        self.prepare_entries(self.plugins, "plugins")
         self.plugins_at = time.monotonic()
 
     def prefetch_plugins(self):
@@ -4589,6 +5862,7 @@ class Launcher(Gtk.Application):
             if generation != self.plugins_generation:
                 return GLib.SOURCE_REMOVE
             self.tray_seen, self.plugins = result
+            self.prepare_entries(self.plugins, "plugins")
             self.plugins_at = time.monotonic()
             # Already on the plugin page: show the fresh list, unless a menu
             # or a sub-page is open (rebuilding rows would close it).
@@ -4598,6 +5872,128 @@ class Launcher(Gtk.Application):
                 self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
             return GLib.SOURCE_REMOVE
         threading.Thread(target=work, daemon=True).start()
+
+    def check_updates(self):
+        """Look for app and plugin updates in the background, at most every
+        updates.CHECK_INTERVAL seconds; the marks appear when it is done."""
+        now = time.monotonic()
+        if self.updates_running or (self.updates_at is not None
+                                    and now - self.updates_at < updates.CHECK_INTERVAL):
+            return
+        self.updates_running = True
+        desktop_paths = [a.get("desktop_path", "") for a in self.apps]
+        try:
+            plugin_ids = [p.name for p in USER_PLUGINS_DIR.iterdir() if p.is_dir()]
+        except OSError:
+            plugin_ids = []
+
+        def work():
+            try:
+                result = updates.check(desktop_paths, plugin_ids)
+            except Exception as error:
+                print("Error checking for updates:", error, file=sys.stderr)
+                result = None
+            GLib.idle_add(apply, result)
+
+        def apply(result):
+            self.updates_running = False
+            self.updates_at = time.monotonic()
+            if result is not None and result != self.updates:
+                self.updates = result
+                if (self.window.get_visible() and not self.actions_menu_open() and self.main_page_open()):
+                    row = self.selected_item()
+                    self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
+
+    def prepare_entries(self, entries, kind):
+        """Freshly read entries: note new ones, use the icons chosen by hand."""
+        self.note_new(entries, kind)
+        icons.apply(entries, self.icon_overrides)
+
+    def note_new(self, entries, kind):
+        ids = [a["desktop_id"] for a in entries if a.get("desktop_id") and "tray_id" not in a]
+        installed = {a["desktop_id"]: a["installed_at"] for a in entries if a.get("installed_at")}
+        if newapps.note(self.seen, ids, kind, installed=installed):
+            self.save_seen()
+
+    def save_seen(self):
+        try:
+            newapps.save(self.seen)
+        except OSError as error:
+            print("Could not save seen.json:", error, file=sys.stderr)
+
+    def is_new(self, app):
+        return bool(app.get("desktop_id")) and "tray_id" not in app and newapps.is_new(self.seen, app["desktop_id"])
+
+    @staticmethod
+    def new_star():
+        """Newly installed: just a small star, the same in rows, cards and folders."""
+        star = Gtk.Label(label="★")
+        star.add_css_class("launcher-new-star-inline")
+        star.set_valign(Gtk.Align.CENTER)
+        star.set_tooltip_text(_("Newly installed"))
+        return star
+
+    def update_plugin(self, app):
+        """Update the plugin in the background (`omarchy plugin update --yes`)
+        and say how it went."""
+        plugin_id = app.get("plugin_id", "")
+        updating = getattr(self, "plugins_updating", set())
+        if not plugin_id or plugin_id in updating:
+            return
+        self.plugins_updating = updating | {plugin_id}
+        self.notify(_("Updating {0}…").format(app["name"]))
+
+        def work():
+            ok, message = updates.run_plugin_update(plugin_id)
+            GLib.idle_add(done, ok, message)
+
+        def done(ok, message):
+            self.plugins_updating = self.plugins_updating - {plugin_id}
+            if ok:
+                self.updates["plugins"].pop(plugin_id, None)
+                self.notify(_("{0} updated").format(app["name"]))
+                self.prefetch_plugins()  # New version, maybe a new name or description.
+            else:
+                self.notify(_("{0} could not be updated").format(app["name"]), message)
+            if self.window.get_visible() and not self.actions_menu_open() and self.main_page_open():
+                row = self.selected_item()
+                self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
+            return GLib.SOURCE_REMOVE
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_system(self):
+        """Omarchy's own update window (password, snapshot, all packages)."""
+        launcher = shutil.which("omarchy-launch-floating-terminal-with-presentation")
+        if launcher is None or shutil.which("omarchy-update") is None:
+            self.notify(_("Could not start the update"), "omarchy-update")
+            return
+        try:
+            subprocess.Popen([launcher, "omarchy-update"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as error:
+            self.notify(_("Could not start the update"), str(error))
+            return
+        self.updates_at = None  # Check again the next time the popup opens.
+        self.hide()
+
+    def update_note(self, app):
+        """"Update available: …" for an entry with an update, else None."""
+        behind = self.updates["plugins"].get(app.get("plugin_id")) if app.get("plugin_id") else None
+        if behind:
+            return ngettext("Update available: {0} new commit", "Update available: {0} new commits",
+                            behind).format(behind)
+        package = self.updates["apps"].get(app.get("desktop_path")) if app.get("desktop_path") else None
+        if package:
+            return _("Update available: {0} {1} → {2}").format(*package)
+        return None
+
+    def update_badge(self, note):
+        badge = self.tile_badge("software-update-available-symbolic", _("Update"))
+        badge.add_css_class("launcher-update-badge")
+        badge.set_tooltip_text(note)
+        return badge
 
     def collect_plugins(self):
         """(tray registration snapshot, plugin page entries). No GTK here:
