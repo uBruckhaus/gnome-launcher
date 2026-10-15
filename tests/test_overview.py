@@ -10,7 +10,9 @@ sys.path.insert(0, str(ROOT))
 import launcher_core  # noqa: E402
 
 NAMES = {"CARD_WIDTH", "TILE_WIDTH", "TILE_MAX_WIDTH", "TILE_SPACING", "MAX_COLUMNS", "CARD_PADDING",
-         "MAX_CARD_WIDTH", "grid_columns"}
+         "MAX_CARD_WIDTH", "grid_columns", "FOLDER_COLUMNS", "FOLDER_ROWS", "FOLDER_ICON",
+         "FOLDER_ICON_MAX", "FOLDER_CELL", "FOLDER_NAME_HEIGHT", "FOLDER_TILE_WIDTH", "folder_columns",
+         "folder_tile_size", "folder_fit"}
 
 
 def load():
@@ -22,6 +24,36 @@ def load():
     namespace = {}
     exec(compile(ast.Module(body=body, type_ignores=[]), "launcher_popup.py", "exec"), namespace)
     return namespace
+
+
+class FolderFitTests(unittest.TestCase):
+    def test_tile_size_matches_the_narrowest_folder(self):
+        ns = load()
+        self.assertEqual(ns["folder_tile_size"](ns["FOLDER_ICON"])[0], ns["FOLDER_TILE_WIDTH"])
+
+    def test_few_folders_grow_to_fill_the_page(self):
+        ns = load()
+        columns, icon = ns["folder_fit"](4, 1200, 800)
+        self.assertGreater(icon, ns["FOLDER_ICON"])
+        self.assertLessEqual(icon, ns["FOLDER_ICON_MAX"])
+        rows = -(-4 // columns)
+        width, height = ns["folder_tile_size"](icon)
+        self.assertLessEqual(columns * width + (columns - 1) * ns["TILE_SPACING"], 1200 - ns["CARD_PADDING"])
+        self.assertLessEqual(rows * height + (rows - 1) * ns["TILE_SPACING"], 800)
+
+    def test_more_folders_shrink_and_a_wider_page_grows(self):
+        ns = load()
+        self.assertGreaterEqual(ns["folder_fit"](4, 1000, 700)[1], ns["folder_fit"](8, 1000, 700)[1])
+        self.assertGreaterEqual(ns["folder_fit"](6, 1400, 900)[1], ns["folder_fit"](6, 1000, 700)[1])
+
+    def test_a_wide_page_puts_few_folders_in_one_row(self):
+        ns = load()
+        self.assertEqual(ns["folder_fit"](3, 1600, 400)[0], 3)
+
+    def test_too_many_keep_the_smallest_size_and_scroll(self):
+        ns = load()
+        self.assertEqual(ns["folder_fit"](40, 600, 400), (ns["folder_columns"](600), ns["FOLDER_ICON"]))
+        self.assertEqual(ns["folder_fit"](0, 600, 400)[1], ns["FOLDER_ICON"])
 
 
 class OverviewTests(unittest.TestCase):

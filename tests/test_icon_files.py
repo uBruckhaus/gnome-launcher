@@ -115,12 +115,12 @@ class IconTextureTests(unittest.TestCase):
         big = self.dir / "app.png"
         big.write_bytes(png(512, 256))
         texture = launcher_popup.icon_texture(str(big))
-        self.assertEqual((texture.get_width(), texture.get_height()), (64, 32))
+        self.assertEqual((texture.get_width(), texture.get_height()), (128, 64))
         svg = self.dir / "app.svg"
         svg.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg' width='100000' height='100000'>"
                         b"<rect width='100000' height='100000' fill='red'/></svg>")
         texture = launcher_popup.icon_texture(str(svg))
-        self.assertEqual((texture.get_width(), texture.get_height()), (64, 64))
+        self.assertEqual((texture.get_width(), texture.get_height()), (128, 128))
         with patch.object(launcher_popup.GdkPixbuf, "PixbufLoader") as loader:
             launcher_popup.icon_texture(str(big))
         loader.assert_not_called()   # cached: rebuilding the list does not decode again

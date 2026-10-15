@@ -30,6 +30,10 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 - **All shortcuts of an app in one place**: launcher-made ones, your own `bindings.lua` binds and Omarchy defaults (including your default terminal, browser and editor, e.g. `Super + Enter` → Foot). Change, remove or turn off any of them; a `+1` badge in the list shows apps with more than one.
 - **No duplicates, no edits to your files**: a key that already opens the same thing is never added twice. Everything lives in a generated `~/.config/hypr/simple-launcher-shortcuts.lua`, validated with `hyprctl configerrors` and rolled back if Hyprland rejects it.
 
+## Changes in 2.0.1
+
+**Folders fill the popup.** Resize the wide popup and the group folders grow or shrink with it: App Manager picks the number of folders per row that gives the largest icons (36–96 px) and fits again when you add or delete a group. With more groups than fit at the smallest size, the page scrolls as before.
+
 ## Changes in 2.0.0
 
 **Dock (optional, off by default).** Settings → **Dock** → *Show dock*. A bar of app icons on a screen edge: the App Manager button, your **pinned apps** (drag to reorder, a bar shows where they land), then the **running apps** that are not pinned, as on macOS. Click starts an app or brings its window to the front (again: the next window), middle-click opens a new window, right-click gives Open / its own actions / Pin or Unpin / Close. Pin apps with **Pin to dock** in their App Manager menu or by **dragging them from App Manager onto the dock**.
@@ -48,7 +52,7 @@ Open an app's menu (`☰`, `→`) → **Shortcut…**, or press `Ctrl+K`.
 
 The dock is its own small process (`dock.py`), started by the bar widget when the shell loads; it quits by itself when switched off. While App Manager is open the dock stays visible and App Manager leaves exactly the dock's area free, so you can drag apps onto it; App Manager only closes on a click outside both. It reads Hyprland's event socket for windows opening, closing, focus and *urgent*.
 
-**Folders.** With **Layout when wide** = *Folders* (the default), the wide popup shows each group as a folder of icons, all the same size (3 × 3, more scroll inside). Click an icon to start it, the folder to open the group (Esc or Backspace goes back), right-click an icon for its full menu, the folder for rename / move / delete. A filter field sits above the folders. **Layout when small** picks the list, groups or by origin for the small popup.
+**Folders.** With **Layout when wide** = *Folders* (the default), the wide popup shows each group as a folder of icons, all the same size (3 × 3, more scroll inside). The folders grow and shrink with the popup to fill it, and fit again when a group is added or deleted (icons 36–96 px; with too many groups for the smallest size the page scrolls). Click an icon to start it, the folder to open the group (Esc or Backspace goes back), right-click an icon for its full menu, the folder for rename / move / delete. A filter field sits above the folders. **Layout when small** picks the list, groups or by origin for the small popup.
 
 **Drag & drop everywhere.** Drag an app from a folder, a card or a list row onto another folder, a group chip or between two icons; drag a group chip or a folder to reorder the groups. A bright bar shows exactly where it will land (left half of the target: before it, right half: after). Your order is kept in `groups.json` and used in every view.
 

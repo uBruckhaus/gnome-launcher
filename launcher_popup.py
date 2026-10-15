@@ -84,8 +84,11 @@ DRAG_GROUP_PREFIX = "app-manager-group:"  # A group dragged to a new place.
 # Folder layout: each group a folder of FOLDER_COLUMNS x FOLDER_ROWS icons.
 FOLDER_COLUMNS = 3
 FOLDER_ROWS = 3
-FOLDER_ICON = 36
+FOLDER_ICON = 36       # The smallest icon: below it the page scrolls.
+FOLDER_ICON_MAX = 96   # The largest, when few folders fill a big popup.
 FOLDER_CELL = FOLDER_ICON + 14  # The icon, its button's padding and border.
+# Under the icons: the box's spacing and the name label (12 px bold).
+FOLDER_NAME_HEIGHT = 6 + 18
 # A folder's narrowest width: its icons, their spacing, the frame's padding
 # and border, and the tile's padding. Two fit side by side at the default size.
 FOLDER_TILE_WIDTH = FOLDER_COLUMNS * FOLDER_CELL + (FOLDER_COLUMNS - 1) * 6 + 2 * 6 + 2 + 2 * 4
@@ -108,12 +111,43 @@ def folder_columns(card_width):
     inner = card_width - CARD_PADDING
     return max(1, (inner + TILE_SPACING) // (FOLDER_TILE_WIDTH + TILE_SPACING))
 
+
+def folder_tile_size(icon):
+    """A folder's narrowest width and its height with icons of this size."""
+    cell = icon + 14
+    icons = FOLDER_COLUMNS * cell + (FOLDER_COLUMNS - 1) * 6
+    rows = FOLDER_ROWS * cell + (FOLDER_ROWS - 1) * 6
+    # Frame padding (6 / 10) and border, then the tile's padding (4 / 4 + 6).
+    return icons + 2 * 6 + 2 + 2 * 4, rows + 2 * 10 + 2 + 4 + 6 + FOLDER_NAME_HEIGHT
+
+
+def folder_fit(count, card_width, height):
+    """Folders per row and icon size so that `count` folders fill the page
+    (card width x page height): the column count that gives the largest
+    icons wins. Too many to fit at FOLDER_ICON: the smallest size, as many
+    per row as fit, and the page scrolls."""
+    inner = card_width - CARD_PADDING
+    if count < 1:
+        return folder_columns(card_width), FOLDER_ICON
+    base_w, base_h = folder_tile_size(0)
+    best_columns, best_icon = 1, -1
+    for columns in range(1, count + 1):
+        rows = -(-count // columns)
+        tile_w = (inner - (columns - 1) * TILE_SPACING) / columns
+        tile_h = (height - (rows - 1) * TILE_SPACING) / rows
+        icon = int(min((tile_w - base_w) / FOLDER_COLUMNS - 14, (tile_h - base_h) / FOLDER_ROWS - 14))
+        if icon > best_icon:
+            best_columns, best_icon = columns, icon
+    if best_icon < FOLDER_ICON:
+        return folder_columns(card_width), FOLDER_ICON
+    return best_columns, min(best_icon, FOLDER_ICON_MAX)
+
 # Where each browser lists its installed web apps.
 APPS_PAGES = {"Chrome": "chrome://apps", "Chromium": "chrome://apps", "Brave": "brave://apps",
               "Edge": "edge://apps", "Vivaldi": "vivaldi://apps"}
 
 
-ICON_DECODE_SIZE = 64          # twice the 32 px rows, for HiDPI
+ICON_DECODE_SIZE = 128         # the largest folder icons; four times the 32 px rows, for HiDPI
 _icon_cache = {}               # (path, mtime_ns, size) -> Gdk.Texture or None
 
 
@@ -862,6 +896,7 @@ class Launcher(Gtk.Application):
         if self.shortcut_app is not None:
             self.sc_page.set_size_request(-1, self.list_h)
         self.apply_grid_columns()
+        self.refit_folders()
         if hasattr(self, "new_group_label"):
             self.new_group_label.set_visible(self.card_w >= 700)
         # The list at the default size; cards or folders once two fit side by side.
@@ -1036,11 +1071,31 @@ class Launcher(Gtk.Application):
 
     def apply_grid_columns(self):
         """Folders or cards per row at the current width."""
-        columns = folder_columns(self.card_w) if self.showing_folders() else grid_columns(self.card_w)
+        if self.showing_folders():
+            columns = folder_fit(getattr(self, "folder_count", 0), self.card_w, self.list_h)[0]
+        else:
+            columns = grid_columns(self.card_w)
         if columns != getattr(self, "grid_columns", None):
             self.grid.set_min_children_per_line(columns)
             self.grid.set_max_children_per_line(columns)
             self.grid_columns = columns
+
+    def refit_folders(self):
+        """Resized: the folders grow or shrink to fill the page. Rebuilt once
+        the size has settled, not on every step of a drag on the grip."""
+        if not getattr(self, "folder_count", 0) or not self.showing_folders():
+            return
+        if folder_fit(self.folder_count, self.card_w, self.list_h)[1] == getattr(self, "folder_icon", FOLDER_ICON):
+            return
+        if getattr(self, "refit_source", None):
+            GLib.source_remove(self.refit_source)
+        self.refit_source = GLib.timeout_add(120, self.on_refit_folders)
+
+    def on_refit_folders(self):
+        self.refit_source = None
+        if self.window is not None and self.showing_folders() and self.main_page_open():
+            self.refresh_list()
+        return GLib.SOURCE_REMOVE
 
     def set_overview(self, enabled):
         """List (one column) or overview (cards): follows the popup's width.
@@ -1159,16 +1214,18 @@ class Launcher(Gtk.Application):
         while child := self.grid.get_first_child():
             self.grid.remove(child)
         selected = None
-        shown = 0
-        for gid, label, members in sections:
-            if gid == "all" or (not members and gid in (groups.RUNNING, groups.OTHER)):
-                continue
+        folders = [(gid, label, members) for gid, label, members in sections
+                   if gid != "all" and (members or gid not in (groups.RUNNING, groups.OTHER))]
+        # As many as there are fill the page: added or deleted groups refit.
+        self.folder_count = len(folders)
+        self.folder_icon = folder_fit(self.folder_count, self.card_w, self.list_h)[1]
+        self.apply_grid_columns()
+        for gid, label, members in folders:
             tile = self.make_folder_tile(gid, label, members)
             self.grid.append(tile)
-            shown += 1
             if selected is None and selected_id == "group:" + gid:
                 selected = tile
-        self.grid_empty.set_visible(not shown)
+        self.grid_empty.set_visible(not folders)
         selected = selected or self.grid.get_child_at_index(0)
         if selected is not None:
             self.grid.select_child(selected)
@@ -1227,6 +1284,8 @@ class Launcher(Gtk.Application):
         icons.set_halign(Gtk.Align.FILL)
         icons.set_valign(Gtk.Align.START)
         icon_marker = self.drop_marker()
+        icon_size = getattr(self, "folder_icon", FOLDER_ICON)
+        cell_size = icon_size + 14
         for index in range(max(FOLDER_COLUMNS * FOLDER_ROWS, len(members))):
             if index < len(members):
                 app = members[index]
@@ -1237,7 +1296,7 @@ class Launcher(Gtk.Application):
                 hidden = app["desktop_id"] in self.hidden_ids_for(app)
                 off_bar = self.off_bar(app)
                 slot = Gtk.Overlay()
-                icon = self.app_icon(app, FOLDER_ICON)
+                icon = self.app_icon(app, icon_size)
                 slot.set_child(icon)
                 if note:
                     # A small mark on the icon, like the run dot on the cards.
@@ -1268,7 +1327,7 @@ class Launcher(Gtk.Application):
                     mark.set_can_target(False)
                     slot.add_overlay(mark)
                 button.set_child(slot)
-                button.set_size_request(FOLDER_CELL, FOLDER_CELL)
+                button.set_size_request(cell_size, cell_size)
                 tip = app["name"]
                 if hidden or off_bar:
                     tip += " (" + (_("Hidden") if hidden else _("Not in bar")) + ")"
@@ -1290,11 +1349,11 @@ class Launcher(Gtk.Application):
                 cell = button
             else:
                 cell = Gtk.Box()  # Keeps three columns in small groups.
-                cell.set_size_request(FOLDER_CELL, FOLDER_CELL)
+                cell.set_size_request(cell_size, cell_size)
             icons.attach(cell, index % FOLDER_COLUMNS, index // FOLDER_COLUMNS, 1, 1)
         scroller = Gtk.ScrolledWindow()
         scroller.add_css_class("launcher-folder-scroller")
-        height = FOLDER_ROWS * FOLDER_CELL + (FOLDER_ROWS - 1) * 6
+        height = FOLDER_ROWS * cell_size + (FOLDER_ROWS - 1) * 6
         scroller.set_min_content_height(height)
         scroller.set_max_content_height(height)
         # Only a folder with more than nine scrolls; the others let the
