@@ -1,0 +1,7 @@
+{
+  "uuid": "launcher-button@ubruckhaus.github.io",
+  "name": "Launcher Button",
+  "description": "A top bar button that opens GNOME Launcher, or closes it while it is open. Switched on and off in Launcher's Settings › Top bar icon.",
+  "shell-version": ["51"],
+  "version-name": "1.0"
+}

@@ -7,6 +7,10 @@ ID=io.github.ubruckhaus.Launcher
 DATA=${XDG_DATA_HOME:-$HOME/.local/share}
 ENTRY=$DATA/applications/$ID.desktop
 ICON=$DATA/icons/hicolor/scalable/apps/$ID.svg
+# The top bar icon (Settings › Top bar icon): linked now, so GNOME Shell finds
+# it at the next login; it stays off until switched on there.
+EXTENSION_UUID=launcher-button@ubruckhaus.github.io
+EXTENSION=$DATA/gnome-shell/extensions/$EXTENSION_UUID
 
 # Only a cache that is already there: a new one would go stale and hide the
 # icons other apps add later.
@@ -18,8 +22,9 @@ refresh_cache() {
 
 if [ "${1:-}" = "--uninstall" ]; then
     rm -f "$ENTRY" "$ICON"
+    [ -L "$EXTENSION" ] && rm -f "$EXTENSION"
     refresh_cache
-    echo "Removed GNOME Launcher's desktop entry and icon. Settings stay in ~/.config/gnome-launcher."
+    echo "Removed GNOME Launcher's desktop entry, icon and top bar extension. Settings stay in ~/.config/gnome-launcher."
     exit 0
 fi
 
@@ -29,6 +34,10 @@ python3 -c 'import gi; gi.require_version("Adw", "1"); gi.require_version("Gtk",
 
 mkdir -p "$(dirname "$ENTRY")" "$(dirname "$ICON")"
 install -m 644 "$ROOT/data/$ID.svg" "$ICON"
+mkdir -p "$(dirname "$EXTENSION")"
+if [ -L "$EXTENSION" ] || [ ! -e "$EXTENSION" ]; then
+    ln -sfn "$ROOT/shell-extension/$EXTENSION_UUID" "$EXTENSION"
+fi
 # Quoted for the desktop entry spec: the path may contain spaces.
 EXEC_PATH=$(printf '%s' "$ROOT/launcher.py" | sed 's/[\\"`$]/\\&/g')
 cat > "$ENTRY" <<ENTRY

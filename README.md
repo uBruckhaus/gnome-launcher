@@ -14,8 +14,8 @@ published.
 Needs Python 3, PyGObject, GTK 4 and libadwaita (all part of a GNOME desktop).
 
 ```sh
-./install.sh              # desktop entry and icon in ~/.local/share
-./install.sh --uninstall  # removes both; settings stay in ~/.config/gnome-launcher
+./install.sh              # desktop entry, icon and top bar extension in ~/.local/share
+./install.sh --uninstall  # removes them; settings stay in ~/.config/gnome-launcher
 ```
 
 It runs from this folder: after `git pull` the next start uses the new code.
@@ -58,6 +58,10 @@ then **its own menu › Shortcut…**.
 - **Newly installed** apps get a ★ for a week or until you open them.
 - **Open as administrator** (off until switched on in Settings; asks for the
   password, off again at the next login).
+- **Top bar icon** (off until switched on in Settings): an icon in GNOME's top
+  bar that opens Launcher, or closes it while it is open. It is a small GNOME
+  Shell extension in `shell-extension/` that `install.sh` links into place;
+  GNOME Shell finds it at the next login after installing.
 
 Keys: type to filter, arrows and Enter, `Ctrl+G` for the next view or group,
 `Ctrl+K` for the shortcut page, `Delete` to quit the selected app, `Esc` to
@@ -71,6 +75,7 @@ go back or close.
 | Your custom icons | `~/.local/share/gnome-launcher/icons/` |
 | Icon search index, AppImage icons | `~/.cache/gnome-launcher/` |
 | The shortcuts themselves | GNOME's custom keybindings (`…/custom-keybindings/gnome-launcher-N/`) |
+| The top bar icon | `~/.local/share/gnome-shell/extensions/launcher-button@ubruckhaus.github.io` (a link), on or off in GNOME's extension list |
 
 ## Network
 

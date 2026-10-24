@@ -45,6 +45,7 @@ import newapps  # noqa: E402
 import icons  # noqa: E402
 import corners  # noqa: E402
 import previews  # noqa: E402
+import topbar  # noqa: E402
 
 # The pages' height at the default window size; the window sizes them after.
 LIST_HEIGHT = 590
@@ -3419,6 +3420,14 @@ class Launcher(Adw.Application):
         grid.attach(label(_("Filter field"), filter_tip), 0, 7, 1, 1)
         grid.attach(filter_switch, 1, 7, 1, 1)
         self.filter_switch = filter_switch
+        topbar_tip = _("An icon in GNOME's top bar that opens Launcher, or closes it while it is open.")
+        topbar_switch = Gtk.Switch(active=topbar.enabled(), halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        topbar_switch.add_css_class("launcher-compact-switch")
+        topbar_switch.set_tooltip_text(topbar_tip)
+        topbar_switch.connect("notify::active", self.on_topbar_toggled)
+        grid.attach(label(_("Top bar icon"), topbar_tip), 0, 8, 1, 1)
+        grid.attach(topbar_switch, 1, 8, 1, 1)
+        self.topbar_switch = topbar_switch
         self.corner_choices = corners.CHOICES
         corners_dropdown = Gtk.DropDown.new_from_strings(self.corner_labels())
         corners_dropdown.add_css_class("launcher-compact-dropdown")
@@ -3492,13 +3501,14 @@ class Launcher(Adw.Application):
         return row
 
     def reset_general_settings(self):
-        """Open as administrator: off; layouts: folders when wide, the list
-        when narrow; corners like the windows."""
+        """Open as administrator and the top bar icon: off; layouts: folders
+        when wide, the list when narrow; corners like the windows."""
         if self.admin_switch.get_active():
             self.admin_switch.set_active(False)  # Its handler switches the action off properly.
         self.set_wide_layout("folders")
         self.toggle_view("list")
         self.set_filter_field(True)
+        self.topbar_switch.set_active(False)
         self.corners_dropdown.set_selected(0)  # "Like windows": saves and redraws.
 
     def sync_previews(self):
@@ -3559,6 +3569,40 @@ class Launcher(Adw.Application):
             self.set_admin_switch(True)
         process.wait_async(None, done)
 
+    def set_topbar_switch(self, active):
+        """Move the switch without treating it as the user's choice."""
+        self.topbar_syncing = True
+        self.topbar_switch.set_active(active)
+        self.topbar_syncing = False
+
+    def on_topbar_toggled(self, switch, _param):
+        """The top bar icon is a GNOME Shell extension shipped with Launcher:
+        linked into place, then switched on or off like in the Extensions app."""
+        if getattr(self, "topbar_syncing", False):
+            return
+        on = switch.get_active()
+        try:
+            if on:
+                topbar.install()
+            done = topbar.set_enabled(on)
+        except (OSError, GLib.Error) as error:
+            self.notify(_("The top bar icon was not switched on") if on else _("The top bar icon was not switched off"),
+                        str(getattr(error, "message", error)))
+            self.set_topbar_switch(topbar.enabled())
+            return
+        if not done:
+            self.notify(_("No top bar icon"), _("GNOME Shell's settings were not found."))
+            self.set_topbar_switch(False)
+            return
+        if not on:
+            return
+        if topbar.user_extensions_off():
+            self.notify(_("The top bar icon is hidden"),
+                        _("Extensions are switched off in the Extensions app; switch them on to see it."))
+        elif topbar.known_to_shell() is False:
+            self.notify(_("The top bar icon appears after you log out and back in"),
+                        _("GNOME Shell finds a new extension only when it starts."))
+
     def settings_open(self):
         return self.stack.get_visible_child_name() == "settings"
 
@@ -3572,6 +3616,7 @@ class Launcher(Adw.Application):
         self.back_button.set_tooltip_text(_("Back (Backspace, Esc)"))
         self.hide_main_header()
         self.set_admin_switch(admin_action_enabled())  # Off again in a new session.
+        self.set_topbar_switch(topbar.enabled())  # Maybe switched in the Extensions app.
         self.sync_corners_control()
         self.stack.set_visible_child_name("settings")
         self.update_title()
