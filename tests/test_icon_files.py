@@ -12,14 +12,14 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import launcher_core  # noqa: E402
 
-# launcher_popup re-executes itself to preload gtk4-layer-shell unless the
+# launcher re-executes itself to preload gtk4-layer-shell unless the
 # library is already listed; tests only need textures, not a layer surface.
 _preload = os.environ.get("LD_PRELOAD")
 os.environ["LD_PRELOAD"] = ":".join(filter(None, ("libgtk4-layer-shell.so.0", _preload)))
 try:
-    import launcher_popup  # noqa: E402
+    import launcher  # noqa: E402
 except Exception:   # no GTK in this environment
-    launcher_popup = None
+    launcher = None
 finally:
     if _preload is None:
         os.environ.pop("LD_PRELOAD", None)
@@ -32,7 +32,7 @@ def png(width=1, height=1):
         return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
     rows = b"".join(b"\x00" + b"\x80\x40\x20" * width for _ in range(height)) if width * height <= 1 << 20 else b""
     ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
-    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
 
 
 def gif(width=1, height=1, frames=1):
@@ -94,12 +94,12 @@ class IconBytesTests(unittest.TestCase):
         self.assertIsNone(launcher_core.icon_bytes(self.dir))   # a directory
 
 
-@unittest.skipIf(launcher_popup is None, "needs GTK")
+@unittest.skipIf(launcher is None, "needs GTK")
 class IconTextureTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        launcher_popup._icon_cache.clear()
+        launcher._icon_cache.clear()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -107,31 +107,31 @@ class IconTextureTests(unittest.TestCase):
     def test_oversized_icon_never_reaches_a_loader(self):
         bomb = self.dir / "tray-icon.png"   # what a tray peer's IconThemePath could hold
         bomb.write_bytes(png(60000, 60000))
-        with patch.object(launcher_popup.GdkPixbuf, "PixbufLoader") as loader:
-            self.assertIsNone(launcher_popup.icon_texture(str(bomb)))
+        with patch.object(launcher.GdkPixbuf, "PixbufLoader") as loader:
+            self.assertIsNone(launcher.icon_texture(str(bomb)))
         loader.assert_not_called()
 
     def test_icons_are_decoded_at_icon_size_and_cached(self):
         big = self.dir / "app.png"
         big.write_bytes(png(512, 256))
-        texture = launcher_popup.icon_texture(str(big))
+        texture = launcher.icon_texture(str(big))
         self.assertEqual((texture.get_width(), texture.get_height()), (128, 64))
         svg = self.dir / "app.svg"
         svg.write_bytes(b"<svg xmlns='http://www.w3.org/2000/svg' width='100000' height='100000'>"
                         b"<rect width='100000' height='100000' fill='red'/></svg>")
-        texture = launcher_popup.icon_texture(str(svg))
+        texture = launcher.icon_texture(str(svg))
         self.assertEqual((texture.get_width(), texture.get_height()), (128, 128))
-        with patch.object(launcher_popup.GdkPixbuf, "PixbufLoader") as loader:
-            launcher_popup.icon_texture(str(big))
+        with patch.object(launcher.GdkPixbuf, "PixbufLoader") as loader:
+            launcher.icon_texture(str(big))
         loader.assert_not_called()   # cached: rebuilding the list does not decode again
 
     def test_replaced_file_is_checked_again(self):
         icon = self.dir / "swap.png"
         icon.write_bytes(png(16, 16))
-        self.assertIsNotNone(launcher_popup.icon_texture(str(icon)))
+        self.assertIsNotNone(launcher.icon_texture(str(icon)))
         icon.write_bytes(png(60000, 60000))
         os.utime(icon, ns=(1, 1))   # different mtime and size: a new cache key
-        self.assertIsNone(launcher_popup.icon_texture(str(icon)))
+        self.assertIsNone(launcher.icon_texture(str(icon)))
 
 
 if __name__ == "__main__":

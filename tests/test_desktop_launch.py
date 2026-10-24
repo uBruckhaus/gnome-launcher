@@ -33,31 +33,34 @@ class DesktopLaunchTests(unittest.TestCase):
                     spawn.assert_not_called()
                     self.assertFalse(marker.exists())
 
-    def test_failed_uwsm_and_gio_never_retry_raw_exec_or_basename(self):
+    def test_failed_gio_never_retries_raw_exec_or_basename(self):
         app = {"desktop_path": "/tmp/example.desktop", "exec": "true; touch INJECTED"}
         for outcome in [None, Mock(launch_uris=Mock(return_value=False)),
                         Mock(launch_uris=Mock(side_effect=RuntimeError("rejected")))]:
             with self.subTest(outcome=outcome), \
-                    patch.object(launcher_core.shutil, "which", return_value="/usr/bin/uwsm-app"), \
-                    patch.object(launcher_core.subprocess, "Popen", side_effect=OSError) as spawn, \
+                    patch.object(launcher_core.subprocess, "Popen") as spawn, \
                     patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=outcome):
                 self.assertFalse(launcher_core.launch_app(app))
-                self.assertEqual(spawn.call_count, 1)
-                self.assertEqual(spawn.call_args.args[0], ["uwsm-app", "--", app["desktop_path"]])
+                spawn.assert_not_called()
 
-    def test_native_success_is_preserved(self):
+    def test_native_success_passes_the_launch_context(self):
         app = {"desktop_path": "/tmp/example.desktop", "exec": "unused"}
         info = Mock(launch_uris=Mock(return_value=True))
-        with patch.object(launcher_core.shutil, "which", return_value=None), \
-                patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=info), \
+        context = object()
+        with patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=info), \
                 patch.object(launcher_core.subprocess, "Popen") as spawn:
-            self.assertTrue(launcher_core.launch_app(app))
-            info.launch_uris.assert_called_once_with([], None)
+            self.assertTrue(launcher_core.launch_app(app, context))
+            info.launch_uris.assert_called_once_with([], context)
             spawn.assert_not_called()
-        with patch.object(launcher_core.shutil, "which", return_value="/usr/bin/uwsm-app"), \
-                patch.object(launcher_core.subprocess, "Popen") as spawn:
-            self.assertTrue(launcher_core.launch_app(app))
-            self.assertEqual(spawn.call_args.args[0], ["uwsm-app", "--", app["desktop_path"]])
+
+    def test_actions_run_through_gio_with_the_context(self):
+        app = {"desktop_path": "/tmp/example.desktop"}
+        info = Mock(list_actions=Mock(return_value=["new-window"]))
+        context = object()
+        with patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=info):
+            self.assertTrue(launcher_core.launch_action(app, "new-window", context))
+            info.launch_action.assert_called_once_with("new-window", context)
+            self.assertFalse(launcher_core.launch_action(app, "missing", context))
 
     def test_exec_without_desktop_path_is_not_executed(self):
         with patch.object(launcher_core.subprocess, "Popen") as spawn:

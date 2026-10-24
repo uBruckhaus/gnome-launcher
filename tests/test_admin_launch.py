@@ -112,7 +112,6 @@ class AdminCommandTests(unittest.TestCase):
 
     def test_apps_that_cannot_run_as_root_get_nothing(self):
         refused = [
-            entry("omarchy-launch-webapp https://example.com"),
             entry("chromium --app=https://example.com"),
             entry("google-chrome --app-id=abc"),
             entry("xdg-open http://localhost:631/"),
@@ -120,9 +119,6 @@ class AdminCommandTests(unittest.TestCase):
             entry("/snap/bin/app"),
             entry("app", sandboxed=True),
             entry("app", pwa=True),
-            {"name": "Widget", "plugin_id": "x.y", "exec": "omarchy-shell shell toggle x.y"},
-            {"name": "Tray", "tray_id": "1", "exec": ""},
-            {"name": "App Manager", "self_launcher": True, "exec": "launcher-toggle"},
         ]
         for app in refused:
             with self.subTest(exec=app.get("exec")):

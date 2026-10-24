@@ -8,7 +8,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import i18n  # noqa: E402
 import groups  # noqa: E402
 
 
@@ -18,21 +17,14 @@ def app(desktop_id, categories=(), **extra):
 
 class GroupTests(unittest.TestCase):
     def setUp(self):
-        i18n._lang = "en"
         self.all = groups.default_data()
         self.data = self.all["apps"]
-
-    def tearDown(self):
-        i18n._lang = None
 
     def test_suggestions_follow_categories_first_match_wins(self):
         self.assertEqual(groups.suggested_group(app("code", ["Utility", "TextEditor", "Development"])), "development")
         self.assertEqual(groups.suggested_group(app("vlc", ["AudioVideo", "Player"])), "media")
         self.assertEqual(groups.suggested_group(app("chromium", ["Network", "WebBrowser"])), "internet")
         self.assertEqual(groups.suggested_group(app("youtube", pwa=True)), "internet")
-        self.assertEqual(groups.suggested_group(app("plugin:x", plugin_id="x", category="Network")), "network")
-        self.assertEqual(groups.suggested_group(app("plugin:y", plugin_id="y", category="Compositor")), "system")
-        self.assertEqual(groups.suggested_group(app("plugin:z", plugin_id="z")), groups.OTHER)
         self.assertEqual(groups.suggested_group(app("odd")), groups.OTHER)
 
     def test_move_by_hand_wins_and_deleting_the_group_moves_it_back(self):
@@ -63,12 +55,8 @@ class GroupTests(unittest.TestCase):
         entries = [app("vlc", ["AudioVideo"]), app("odd"), app("writer", ["Office"])]
         sections = groups.sections(entries, self.data, running=lambda a: a["desktop_id"] == "writer")
         self.assertEqual(sections[0], (groups.RUNNING, [entries[2]]))
-        # Running and in its own group too; tray icons only in Running.
+        # Running and in its own group too.
         self.assertIn(entries[2], dict(sections)["office"])
-        tray_item = {"desktop_id": "nordvpn", "name": "NordVPN", "tray_id": "nordvpn"}
-        with_tray = groups.sections([tray_item], self.data, running=lambda a: "tray_id" in a)
-        self.assertEqual(with_tray[0], (groups.RUNNING, [tray_item]))
-        self.assertTrue(all(tray_item not in members for _g, members in with_tray[1:]))
         self.assertEqual([gid for gid, _m in sections[1:3]], ["internet", "office"])
         self.assertEqual(sections[-1], (groups.OTHER, [entries[1]]))
 
@@ -101,7 +89,7 @@ class GroupTests(unittest.TestCase):
         groups.place(self.data, "x", "media", None, ["y"])
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "groups.json"
-            groups.save({"apps": self.data, "plugins": groups.default_page("plugins")}, path)
+            groups.save({"apps": self.data}, path)
             self.assertEqual(groups.load(path)["apps"]["order"], ["y", "x"])
             path.write_text('{"apps": {"groups": [], "order": ["a", 5, "a", ""]}}')
             self.assertEqual(groups.load(path)["apps"]["order"], ["a"])
@@ -116,7 +104,7 @@ class GroupTests(unittest.TestCase):
                 "members": {"vlc": "g1", "bad": "nope", "x" * 400: "g1"},
                 "collapsed": ["g1", "gone", 3]}}))
             loaded = groups.load(path)
-            self.assertEqual(loaded["plugins"], groups.default_page("plugins"))
+            self.assertEqual(set(loaded), {"apps"})   # Other pages (the old plugin page) are dropped.
             data = loaded["apps"]
             self.assertEqual([g["id"] for g in data["groups"]], ["g1", "office"])
             self.assertEqual(data["groups"][0]["name"], "<b>Bold</b>")   # shown as plain text
@@ -161,7 +149,7 @@ class NewGroupMarkTests(unittest.TestCase):
         self.assertTrue(groups.is_new(data, gid))
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "groups.json"
-            groups.save({"apps": data, "plugins": groups.default_page("plugins")}, path)
+            groups.save({"apps": data}, path)
             loaded = groups.load(path)["apps"]
         self.assertTrue(groups.is_new(loaded, gid))
         self.assertFalse(groups.is_new(loaded, "office"))

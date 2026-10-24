@@ -11,14 +11,14 @@ import groups  # noqa: E402
 
 
 def launcher_methods(*names):
-    tree = ast.parse((ROOT / "launcher_popup.py").read_text())
+    tree = ast.parse((ROOT / "launcher.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Launcher")
     cls.bases = []
     cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
     gdk = Mock()
     gdk.DragAction.COPY = 1
     namespace = {"Gdk": gdk, "GLib": Mock(), "Gtk": Mock(), "groups": groups}
-    exec(compile(ast.Module(body=[cls], type_ignores=[]), "launcher_popup.py", "exec"), namespace)
+    exec(compile(ast.Module(body=[cls], type_ignores=[]), "launcher.py", "exec"), namespace)
     return namespace["Launcher"]
 
 
@@ -36,8 +36,7 @@ class CardDropTests(unittest.TestCase):
         self.app.filter_bar = Mock()
         self.app.search_query = ""
         self.app.mark_filter = None
-        self.app.mode = "apps"
-        self.app.overview_filter = {"apps": "all", "plugins": "all"}
+        self.app.overview_filter = "all"
 
     def test_foreign_drop_is_refused_without_reading_it(self):
         drop = Mock()
@@ -62,18 +61,12 @@ class CardDropTests(unittest.TestCase):
         self.app.search_query = "vl"
         self.app.on_tile_drag_begin(Mock(), Mock(), card)
         self.app.on_chip_drop(None, Mock(), 0, 0, "media")
-        self.assertEqual(self.app.overview_filter["apps"], "media")
+        self.assertEqual(self.app.overview_filter, "media")
 
     def test_drop_without_typing_keeps_the_filter(self):
         self.app.on_tile_drag_begin(Mock(), Mock(), {"desktop_id": "vlc", "name": "VLC"})
         self.app.on_chip_drop(None, Mock(), 0, 0, "media")
-        self.assertEqual(self.app.overview_filter["apps"], "all")
-
-    def test_tray_icons_have_no_group(self):
-        self.app.on_tile_drag_begin(Mock(), Mock(), {"desktop_id": "x", "tray_id": "x"})
-        drop = Mock()
-        self.assertFalse(self.app.on_chip_drop(None, drop, 0, 0, "media"))
-        self.app.put_in_group.assert_not_called()
+        self.assertEqual(self.app.overview_filter, "all")
 
     def ids(self):
         return [g["id"] for g in self.app.groups["groups"]]

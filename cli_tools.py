@@ -1,12 +1,11 @@
-"""Command-line agents and TUIs installed with mise, as entries that open in
-a terminal (like Omarchy's own TUI launchers).
+"""Command-line agents and TUIs, as entries that open in a terminal.
 
-Omarchy writes small wrappers into ~/.local/bin for every agent it offers
-(`mise use -g "<tool>"` then `exec mise x "<tool>" -- "<bin>"`), installed or
-not: a wrapper installs its tool on first run. So an entry is listed only
-when mise has really installed the tool (~/.local/share/mise/installs/<dir>),
+Found three ways: wrappers in ~/.local/bin that run a mise tool
+(`exec mise x "<tool>" -- "<bin>"`, as Omarchy writes them), listed only
+when mise has really installed the tool (~/.local/share/mise/installs/<dir>)
 and dated by when that folder was created, so only a fresh install counts as
-new. Agents mise installed without a wrapper (codex) are found by name."""
+new; agents mise installed without a wrapper, by their shim; and known
+agents installed any other way (npm, their own installer), on the PATH."""
 import re
 import shutil
 import subprocess
@@ -28,10 +27,10 @@ NAMES = {
     "goose": "Goose", "aider": "Aider", "qwen": "Qwen Code", "openclaw": "OpenClaw",
     "ghui": "ghui", "hunk": "hunk",
 }
-# Agents mise may install without an Omarchy wrapper; found by their shim.
+# Agents found without a wrapper: by their mise shim, or on the PATH.
 KNOWN_AGENTS = ("codex", "claude", "copilot", "cursor-agent", "opencode", "gemini", "crush",
                 "amp", "goose", "aider", "qwen", "openclaw", "pi")
-# Wrapped by Omarchy too, but plain commands, not something to open in a window.
+# Wrapped too, but plain commands, not something to open in a window.
 NOT_APPS = {"gh", "node", "npm", "npx", "bun", "deno", "python", "python3", "uv", "go", "cargo", "mise"}
 
 
@@ -45,7 +44,7 @@ def install_dir_candidates(spec):
 
 
 def wrapper_tools(bin_dir=BIN_DIR):
-    """{command: tool spec} from Omarchy's mise wrappers."""
+    """{command: tool spec} from mise wrappers."""
     tools = {}
     try:
         paths = sorted(p for p in bin_dir.iterdir() if p.is_file())[:MAX_WRAPPERS]
@@ -90,7 +89,7 @@ def icon_for(command):
     return "utilities-terminal"
 
 
-def cli_entries(known_commands, bin_dir=BIN_DIR, mise_dir=MISE_DIR):
+def cli_entries(known_commands, bin_dir=BIN_DIR, mise_dir=MISE_DIR, which=shutil.which):
     """Entries for installed CLI tools that no .desktop file opens already.
     known_commands: command names other entries launch (claude for foot -e …/claude)."""
     installs = mise_dir / "installs"
@@ -98,18 +97,25 @@ def cli_entries(known_commands, bin_dir=BIN_DIR, mise_dir=MISE_DIR):
     for name in KNOWN_AGENTS:
         if name not in tools and (mise_dir / "shims" / name).exists():
             tools[name] = name
-    launcher = shutil.which("omarchy-launch-tui")
+    # Known agents installed another way: the program on the PATH.
+    elsewhere = {}
+    for name in KNOWN_AGENTS:
+        found = which(name) if name not in tools else None
+        if found:
+            elsewhere[name] = Path(found)
     entries = []
-    for command, spec in sorted(tools.items()):
+    for command, spec in sorted({**tools, **{name: None for name in elsewhere}}.items()):
         if command in known_commands or command in NOT_APPS:
             continue
-        folder = next((installs / c for c in install_dir_candidates(spec) if c and (installs / c).is_dir()), None)
-        if folder is None:
-            continue  # Offered by Omarchy, not installed.
-        target = bin_dir / command if (bin_dir / command).exists() else mise_dir / "shims" / command
-        app_id = f"org.omarchy.{command}"
-        argv = ([launcher, f"--app-id={app_id}", str(target)] if launcher
-                else ["xdg-terminal-exec", f"--app-id={app_id}", "-e", str(target)])
+        if spec is None:
+            folder = target = elsewhere[command]
+        else:
+            folder = next((installs / c for c in install_dir_candidates(spec) if c and (installs / c).is_dir()), None)
+            if folder is None:
+                continue  # A wrapper whose tool is not installed yet.
+            target = bin_dir / command if (bin_dir / command).exists() else mise_dir / "shims" / command
+        app_id = f"io.github.ubruckhaus.Launcher.{command}"
+        argv = ["xdg-terminal-exec", f"--app-id={app_id}", "-e", str(target)]
         entries.append({
             "name": NAMES.get(command, command),
             "exec": " ".join(argv),

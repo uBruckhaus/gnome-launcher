@@ -1,7 +1,5 @@
-"""Update checks: parsing tool output, a checkout behind its upstream, the mapping to entries."""
-import subprocess
+"""Update checks: parsing tool output, the mapping to entries, Flatpak updates."""
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -10,10 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 import updates  # noqa: E402
 
-
-def git(directory, *args):
-    subprocess.run(["git", "-C", str(directory), "-c", "user.name=t", "-c", "user.email=t@t",
-                    "-c", "commit.gpgsign=false", *args], check=True, capture_output=True)
 
 
 class ParseTests(unittest.TestCase):
@@ -37,21 +31,31 @@ class ParseTests(unittest.TestCase):
     def test_check_maps_desktop_files_to_package_updates(self):
         with mock.patch.object(updates, "desktop_packages", return_value={"/usr/a.desktop": "a", "/usr/b.desktop": "b"}), \
                 mock.patch.object(updates, "package_updates", return_value={"a": ("1", "2")}), \
-                mock.patch.object(updates, "plugin_updates", return_value={"p": 3}):
-            self.assertEqual(updates.check([], []), {"apps": {"/usr/a.desktop": ("a", "1", "2")}, "plugins": {"p": 3}})
+                mock.patch.object(updates, "flatpak_updates", return_value={"org.x.Y": ("1", "2")}):
+            self.assertEqual(updates.check([]), {"apps": {"/usr/a.desktop": ("a", "1", "2")},
+                                                 "flatpaks": {"org.x.Y": ("1", "2")}})
+
+    def test_flatpak_lines(self):
+        text = "org.gnome.Maps\t49.1\ncom.example.NoVersion\t\nnot a line\n"
+        self.assertEqual(updates.parse_flatpak_lines(text),
+                         {"org.gnome.Maps": "49.1", "com.example.NoVersion": ""})
+
+    def test_flatpak_updates_pair_installed_and_available(self):
+        outputs = {"remote-ls": "org.gnome.Maps\t49.2\n", "list": "org.gnome.Maps\t49.1\nother.App\t1\n"}
+        with mock.patch.object(updates.shutil, "which", return_value="/usr/bin/flatpak"), \
+                mock.patch.object(updates, "read_bounded_output", side_effect=lambda argv, **_k: outputs[argv[1]]):
+            self.assertEqual(updates.flatpak_updates(), {"org.gnome.Maps": ("49.1", "49.2")})
 
 
 class RunUpdateTests(unittest.TestCase):
     def test_success_and_failure_message(self):
         ok = mock.Mock(return_value=(0, "Updated x."))
-        self.assertEqual(updates.run_plugin_update("me.plugin", ok), (True, ""))
-        self.assertEqual(ok.call_args[0][0], ["omarchy", "plugin", "update", "me.plugin", "--yes"])
-        bad = mock.Mock(return_value=(1, "omarchy-plugin-update: cannot fast-forward 'me.plugin'; "
-                                         "you have local changes in /x\n"))
-        self.assertEqual(updates.run_plugin_update("me.plugin", bad),
-                         (False, "cannot fast-forward 'me.plugin'; you have local changes in /x"))
+        self.assertEqual(updates.run_flatpak_update("org.gnome.Maps", ok), (True, ""))
+        self.assertEqual(ok.call_args[0][0], ["flatpak", "update", "-y", "--noninteractive", "org.gnome.Maps"])
+        bad = mock.Mock(return_value=(1, "Updating…\nerror: no remote\n"))
+        self.assertEqual(updates.run_flatpak_update("org.gnome.Maps", bad), (False, "error: no remote"))
         hung = mock.Mock(return_value=(None, ""))
-        self.assertEqual(updates.run_plugin_update("me.plugin", hung), (False, "timed out or too much output"))
+        self.assertEqual(updates.run_flatpak_update("org.gnome.Maps", hung), (False, "timed out or too much output"))
 
     def test_bounded_runner_stops_floods_and_slow_commands(self):
         code, out = updates.run_bounded(["sh", "-c", "yes x"], 1000, 5)
@@ -64,28 +68,9 @@ class RunUpdateTests(unittest.TestCase):
     def test_bad_ids_never_run(self):
         run = mock.Mock()
         for bad in ("", "../x", "-rf", "a b", "a..b"):
-            self.assertFalse(updates.run_plugin_update(bad, run)[0])
+            self.assertFalse(updates.run_flatpak_update(bad, run)[0])
         run.assert_not_called()
 
-
-class GitTests(unittest.TestCase):
-    def test_checkout_behind_its_upstream(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            origin, plugins = Path(tmp) / "origin", Path(tmp) / "plugins"
-            origin.mkdir()
-            git(origin, "init", "-q", "-b", "main")
-            (origin / "a").write_text("1")
-            git(origin, "add", "a")
-            git(origin, "commit", "-q", "-m", "one")
-            plugins.mkdir()
-            subprocess.run(["git", "clone", "-q", str(origin), str(plugins / "me.plugin")], check=True,
-                           capture_output=True)
-            with mock.patch.object(updates, "USER_PLUGINS_DIR", plugins):
-                self.assertEqual(updates.plugin_updates(["me.plugin", "../x", "missing"]), {})
-                (origin / "a").write_text("2")
-                git(origin, "commit", "-q", "-am", "two")
-                self.assertEqual(updates.plugin_updates(["me.plugin"], fetch=False), {})
-                self.assertEqual(updates.plugin_updates(["me.plugin"]), {"me.plugin": 1})
 
 
 if __name__ == "__main__":

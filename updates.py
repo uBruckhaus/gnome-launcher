@@ -1,77 +1,23 @@
-"""Which apps and plugins have updates: no GTK here, it runs on a thread.
+"""Which apps have updates: no GTK here, it runs on a thread.
 
-Plugins: a git checkout in ~/.config/omarchy/plugins that is behind its
-remote's default branch after a fetch (what `omarchy plugin update` would pull).
-Apps: the package that owns the app's .desktop file has a newer version in
-the repositories (checkupdates) or the AUR (yay -Qua)."""
+Packages: the package that owns the app's .desktop file has a newer version
+in the repositories (checkupdates) or the AUR (yay / paru -Qua).
+Flatpaks: `flatpak remote-ls --updates` lists the app's id."""
 import os
 import re
 import shutil
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
-from launcher_core import USER_PLUGINS_DIR, read_bounded_output
+from launcher_core import read_bounded_output
 
 CHECK_INTERVAL = 30 * 60   # Seconds between checks (each one fetches).
-MAX_PLUGINS = 64
 MAX_DESKTOP_FILES = 2000
 # "name 1.2-1 -> 1.3-1" from checkupdates and yay -Qua.
 _UPDATE_LINE = re.compile(r"^([A-Za-z0-9@._+-]{1,128}) (\S{1,64}) -> (\S{1,64})$")
+# "org.gnome.Maps\t49.1" from flatpak's application,version columns.
+_FLATPAK_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]{2,254})\t(\S{0,64})$")
 # "/usr/share/applications/x.desktop is owned by name 1.2-1" from pacman -Qo.
 _OWNER_LINE = re.compile(r"^(/.{1,1024}) is owned by ([A-Za-z0-9@._+-]{1,128}) \S{1,64}$")
-
-
-def _quiet_git_env():
-    env = dict(os.environ)
-    # Never ask for a password or a host key: a check runs unattended.
-    env.update(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/true", SSH_ASKPASS="/bin/true",
-               GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10", LC_ALL="C")
-    return env
-
-
-def plugin_behind(directory, fetch=True):
-    """Commits the checkout is behind its upstream, or None (no git, no
-    upstream, offline)."""
-    directory = Path(directory)
-    if not (directory / ".git").exists():
-        return None
-    env = _quiet_git_env()
-    # The same comparison as `omarchy plugin update`: the remote's default
-    # branch (origin HEAD), fetched into FETCH_HEAD.
-    if fetch:
-        read_bounded_output(["git", "-C", str(directory), "fetch", "--quiet", "--no-tags", "origin", "HEAD"],
-                            max_bytes=64 * 1024, timeout=30, env=env)
-    count = read_bounded_output(["git", "-C", str(directory), "rev-list", "--count", "HEAD..FETCH_HEAD"],
-                                max_bytes=64, timeout=5, env=env)
-    try:
-        return int(count.strip()) if count is not None else None
-    except ValueError:
-        return None
-
-
-def plugin_updates(plugin_ids, fetch=True):
-    """{plugin id: commits behind} for the installed plugins with updates."""
-    ids = [p for p in dict.fromkeys(plugin_ids) if isinstance(p, str) and p and "/" not in p
-           and ".." not in p][:MAX_PLUGINS]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        counts = pool.map(lambda p: plugin_behind(USER_PLUGINS_DIR / p, fetch), ids)
-        return {p: n for p, n in zip(ids, counts) if n}
-
-
-def run_plugin_update(plugin_id, run=None):
-    """`omarchy plugin update <id> --yes`: fast-forward only (local changes
-    stop it), validated, rolled back on failure, then the shell rescans.
-    (ok, message): the command's last error line when it failed."""
-    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", plugin_id or "") or ".." in plugin_id:
-        return False, "invalid plugin id"
-    run = run or run_bounded
-    code, output = run(["omarchy", "plugin", "update", plugin_id, "--yes"], 64 * 1024, 180, _quiet_git_env())
-    if code == 0:
-        return True, ""
-    lines = [l.strip() for l in (output or "").splitlines() if l.strip()]
-    message = lines[-1] if lines else ("timed out or too much output" if code is None else f"exit {code}")
-    return False, message.removeprefix("omarchy-plugin-update: ")[:300]
 
 
 def run_bounded(command, max_bytes, timeout, env=None):
@@ -152,11 +98,52 @@ def desktop_packages(paths):
         env={**os.environ, "LC_ALL": "C"}))
 
 
-def check(desktop_paths, plugin_ids, fetch=True):
-    """Everything at once, for the popup's background thread."""
+def parse_flatpak_lines(text):
+    """{app id: version} from flatpak's `--columns=application,version`."""
+    result = {}
+    for line in (text or "").splitlines():
+        match = _FLATPAK_LINE.match(line.rstrip("\n"))
+        if match:
+            result[match.group(1)] = match.group(2)
+    return result
+
+
+def flatpak_updates():
+    """{app id: (installed version, available version)} for the Flatpak
+    apps with an update (asks the remotes)."""
+    if not shutil.which("flatpak"):
+        return {}
+    columns = ["--app", "--columns=application,version"]
+    available = parse_flatpak_lines(read_bounded_output(
+        ["flatpak", "remote-ls", "--updates", *columns], max_bytes=1024 * 1024, timeout=90))
+    if not available:
+        return {}
+    installed = parse_flatpak_lines(read_bounded_output(
+        ["flatpak", "list", *columns], max_bytes=1024 * 1024, timeout=20))
+    return {app: (installed.get(app, ""), version) for app, version in available.items()}
+
+
+def run_flatpak_update(app_id, run=None):
+    """`flatpak update -y <app id>`: one Flatpak app on its own (unlike a
+    package, which is never updated alone on Arch). (ok, message)."""
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]{2,254}", app_id or "") or ".." in app_id:
+        return False, "invalid app id"
+    run = run or run_bounded
+    code, output = run(["flatpak", "update", "-y", "--noninteractive", app_id], 64 * 1024, 600,
+                       {**os.environ, "LC_ALL": "C"})
+    if code == 0:
+        return True, ""
+    lines = [l.strip() for l in (output or "").splitlines() if l.strip()]
+    return False, (lines[-1] if lines else ("timed out or too much output" if code is None else f"exit {code}"))[:300]
+
+
+def check(desktop_paths, fetch=True):
+    """Everything at once, for the window's background thread: {"apps":
+    {.desktop path: (package, installed, available)}, "flatpaks": {app id:
+    (installed, available)}}."""
     owners = desktop_packages(desktop_paths)
     packages = package_updates() if owners else {}
     return {
         "apps": {path: (pkg, *packages[pkg]) for path, pkg in owners.items() if pkg in packages},
-        "plugins": plugin_updates(plugin_ids, fetch),
+        "flatpaks": flatpak_updates() if fetch else {},
     }

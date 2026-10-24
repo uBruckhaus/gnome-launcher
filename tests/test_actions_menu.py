@@ -9,17 +9,17 @@ from unittest.mock import Mock
 
 class ActionsMenuTests(unittest.TestCase):
     def setUp(self):
-        source = Path(__file__).resolve().parents[1] / "launcher_popup.py"
+        source = Path(__file__).resolve().parents[1] / "launcher.py"
         tree = ast.parse(source.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Launcher")
-        names = {"actions_menu_open", "on_actions_closed", "poll", "hide_if_inactive", "reload_apps", "on_key", "settings_open"}
+        names = {"actions_menu_open", "on_actions_closed", "poll", "reload_apps", "on_key", "settings_open"}
         cls.bases = []
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
         self.glib = SimpleNamespace(SOURCE_REMOVE=False, SOURCE_CONTINUE=True,
                                     idle_add=Mock(), timeout_add=Mock(return_value=123))
         # Threads run at once in these tests.
         thread = lambda target, daemon=True: SimpleNamespace(start=target)
-        namespace = {"threading": SimpleNamespace(Thread=thread), "dock_core": Mock(),
+        namespace = {"threading": SimpleNamespace(Thread=thread),
                      "GLib": self.glib, "Gdk": SimpleNamespace(KEY_Escape=27, KEY_BackSpace=8, KEY_Super_L=65515, KEY_Super_R=65516), "time": time}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
         self.app = namespace["Launcher"]()
@@ -38,7 +38,6 @@ class ActionsMenuTests(unittest.TestCase):
         self.app.theme.reload.return_value = False
         self.app.hide = Mock()
         self.app.shortcut_app = None
-        self.app.mode = "apps"
         self.app.stack = Mock()
         self.app.stack.get_visible_child_name.return_value = "list"
 
@@ -54,24 +53,6 @@ class ActionsMenuTests(unittest.TestCase):
         self.glib.timeout_add.assert_called_once_with(700, self.app.reload_apps)
         self.assertEqual(self.app.apps_changed_source, 123)
         self.app.refresh_list.assert_not_called()
-
-    def test_temporary_focus_loss_keeps_launcher_open(self):
-        self.app.hide_if_inactive()
-        self.app.hide.assert_not_called()
-        self.menu.get_visible.return_value = False
-        self.app.hide_if_inactive()
-        self.app.hide.assert_called_once()
-
-    def test_focus_lost_to_the_dock_keeps_launcher_open(self):
-        self.menu.get_visible.return_value = False
-        self.glib.idle_add.side_effect = lambda fn, *args: fn(*args)  # The decision, at once.
-        self.app.dock_screen_rect = (0, 900, 300, 80)
-        self.namespace["dock_core"].inside.return_value = True  # Focus followed the mouse onto the dock.
-        self.app.hide_if_inactive()
-        self.app.hide.assert_not_called()
-        self.namespace["dock_core"].inside.return_value = False  # Clicked a window elsewhere.
-        self.app.hide_if_inactive()
-        self.app.hide.assert_called_once()
 
     def test_escape_dismisses_menu_without_clearing_search_or_launcher(self):
         self.app.search_query = "browser"

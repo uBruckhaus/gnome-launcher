@@ -1,12 +1,10 @@
-"""Groups for the group view: Office, Media, … on the app page; System,
-Network, … on the plugin page. Each page has its own groups.
+"""Groups for the group view: Office, Media, …
 
 Every entry is in exactly one group. An entry the user never moved lands in
-the group its categories suggest (desktop Categories for apps, the
-manifest's bar category for plugins), or in Other when there is none or that
-group was deleted; a move by hand is remembered by desktop id. Built-in
-groups keep an empty name until renamed, so they follow the interface
-language. Tray icons are not grouped: they head the plugin page.
+the group its desktop Categories suggest, or in Other when there is none or
+that group was deleted; a move by hand is remembered by desktop id. Built-in
+groups keep an empty name until renamed. The file keeps the groups under
+"apps", one page.
 """
 import json
 import os
@@ -15,12 +13,12 @@ from pathlib import Path
 
 from i18n import _, N_
 
-GROUPS_FILE = Path.home() / ".config/applauncher/groups.json"
+GROUPS_FILE = Path.home() / ".config/gnome-launcher/groups.json"
 OTHER = "other"        # Always there, always last; not renamed or deleted.
 RUNNING = "_running"   # The "Running" section on top of the group view.
-PAGES = ("apps", "plugins")
+PAGES = ("apps",)
 # The fixed sections of the "by origin" view.
-ORIGINS = ("o-defaults", "o-omarchy", "o-other")
+ORIGINS = ("o-defaults", "o-system", "o-flatpak", "o-user")
 MAX_GROUPS = 50
 MAX_MEMBERS = 5000
 MAX_NAME = 40
@@ -35,22 +33,10 @@ BUILTIN_NAMES = {
     "games": N_("Games"),
     "system": N_("System"),
     "utilities": N_("Utilities"),
-    "network": N_("Network"),
-    "home": N_("Home"),
-    "tools": N_("Tools"),
 }
 BUILTIN_ORDER = {
     "apps": ("office", "internet", "media", "graphics", "development", "games", "system", "utilities"),
-    "plugins": ("system", "network", "media", "home", "tools"),
 }
-# A plugin's barWidget.category (free text in manifests) to a plugin group.
-PLUGIN_CATEGORY_GROUPS = (
-    ("system", {"system", "compositor", "layout", "windows", "files", "info", "time", "hardware", "desktop"}),
-    ("network", {"network", "communication", "internet"}),
-    ("media", {"media", "audio", "video", "music"}),
-    ("home", {"home", "smart home"}),
-    ("tools", {"tools", "utilities", "widgets", "accessibility", "ai", "productivity", "developer tools"}),
-)
 
 # First match wins: a text editor tagged Utility;Development is development.
 CATEGORY_GROUPS = (
@@ -86,7 +72,7 @@ def clean_name(text):
 
 
 def load(path=None):
-    """{"apps": page, "plugins": page}: the saved groups, or the suggested
+    """{"apps": page}: the saved groups, or the suggested
     ones. Anything malformed is dropped entry by entry."""
     path = Path(path or GROUPS_FILE)
     try:
@@ -154,18 +140,18 @@ def save(data, path=None):
         raise
 
 
-def display_name(group_or_id, data=None, page="apps"):
+ORIGIN_NAMES = {"o-defaults": N_("Your default apps"), "o-system": N_("System"),
+                "o-flatpak": N_("Flatpak"), "o-user": N_("Your own")}
+
+
+def display_name(group_or_id, data=None):
     if isinstance(group_or_id, str):
         if group_or_id == OTHER:
             return _("Other")
         if group_or_id == RUNNING:
-            return _("Running in the bar") if page == "plugins" else _("Running")
-        if group_or_id == "o-defaults":
-            return _("Your default apps")
-        if group_or_id == "o-omarchy":
-            return _("Built into Omarchy") if page == "plugins" else _("Comes with Omarchy")
-        if group_or_id == "o-other":
-            return _("Other")
+            return _("Running")
+        if group_or_id in ORIGIN_NAMES:
+            return _(ORIGIN_NAMES[group_or_id])
         group = next((g for g in (data or {}).get("groups", []) if g["id"] == group_or_id), None)
         if group is None:
             return _("Other")
@@ -176,12 +162,6 @@ def display_name(group_or_id, data=None, page="apps"):
 
 def suggested_group(app):
     """The built-in group an entry belongs in by itself."""
-    if "plugin_id" in app:
-        category = str(app.get("category") or "").strip().casefold()
-        for gid, names in PLUGIN_CATEGORY_GROUPS:
-            if category in names:
-                return gid
-        return OTHER
     categories = set(app.get("categories") or ())
     for gid, names in CATEGORY_GROUPS:
         if categories & names:
@@ -292,7 +272,7 @@ def toggle_collapsed(data, gid):
 def sections(entries, data, running=None):
     """[(group id, [entries])] in display order: Running (when given), the
     groups, then Other. A running entry shows in Running and in its own
-    group; tray icons have no group and show in Running only. Empty groups
+    group. Empty groups
     are included; callers drop them while filtering."""
     order = [g["id"] for g in data["groups"]] + [OTHER]
     buckets = {gid: [] for gid in order}
@@ -300,8 +280,7 @@ def sections(entries, data, running=None):
     for app in entries:
         if running is not None and running(app):
             first.append(app)
-        if "tray_id" not in app:
-            buckets[group_of(app, data)].append(app)
+        buckets[group_of(app, data)].append(app)
     result = [(RUNNING, first)] if running is not None else []
     return result + [(gid, in_hand_order(buckets[gid], data)) for gid in order]
 
@@ -328,13 +307,13 @@ def place(data, desktop_id, gid, target_id, member_ids, after=False):
 
 def origin_sections(entries, classify, running=None):
     """Sections of the "by origin" view: Running (when given), your default
-    apps, came with Omarchy, other. classify(app) -> "defaults" | "omarchy" | "other"."""
+    apps, system, Flatpak, your own. classify(app) -> "defaults" | "system" |
+    "flatpak" | "user"."""
     buckets = {gid: [] for gid in ORIGINS}
     first = []
     for app in entries:
         if running is not None and running(app):
             first.append(app)
-        if "tray_id" not in app:
-            buckets["o-" + classify(app)].append(app)
+        buckets["o-" + classify(app)].append(app)
     result = [(RUNNING, first)] if running is not None else []
     return result + [(gid, buckets[gid]) for gid in ORIGINS]

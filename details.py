@@ -1,9 +1,10 @@
-"""Facts for the details page: where an app or plugin lives, which package
-it came from, how big it is and when it was installed.
+"""Facts for the details page: where an app lives, which package
+it came from, how big it is and when it was installed; where it came from
+(the "by origin" view) and how it is uninstalled.
 
-Everything here only reads. Paths come from desktop files and manifests, so
+Everything here only reads. Paths come from desktop files, so
 they are resolved and checked before use; pacman gets absolute paths only;
-every read and folder walk is bounded.
+every read is bounded.
 """
 import os
 import re
@@ -15,7 +16,6 @@ from launcher_core import TERMINALS, read_bounded_output
 
 PACMAN_DB = Path("/var/lib/pacman/local")
 MAX_DESC_BYTES = 256 * 1024
-MAX_WALK_FILES = 20000
 MAX_TEXT = 300
 _PKG_RE = re.compile(r"^[A-Za-z0-9@._+-]{1,128}$")
 
@@ -30,7 +30,7 @@ def short(text, limit=MAX_TEXT):
 
 
 SHELLS = {"sh", "bash", "zsh", "fish", "dash"}
-WEBAPP_LAUNCHERS = {"omarchy-launch-webapp", "xdg-open"}
+WEBAPP_LAUNCHERS = {"xdg-open"}
 
 
 def command_argv(app):
@@ -50,7 +50,7 @@ def command_argv(app):
 
 
 def web_address(app):
-    """The address a web app opens (omarchy-launch-webapp URL), or None."""
+    """The address a web app opens (xdg-open URL), or None."""
     argv = command_argv(app)
     if len(argv) > 1 and Path(argv[0]).name in WEBAPP_LAUNCHERS and re.match(r"^https?://", argv[1]):
         return argv[1]
@@ -138,55 +138,6 @@ def package_info(name, db=PACMAN_DB):
     return None
 
 
-def folder_size(path, limit=MAX_WALK_FILES):
-    """(bytes, complete) for the files below path, never following links."""
-    total, count = 0, 0
-    for root, dirs, files in os.walk(path, followlinks=False):
-        for name in files:
-            count += 1
-            if count > limit:
-                return total, False
-            try:
-                total += os.lstat(os.path.join(root, name)).st_size
-            except OSError:
-                pass
-    return total, True
-
-
-def git_source(directory):
-    """(remote URL, short commit, clone time) of a plugin's git checkout.
-    Read from the files, without running git in a folder that may be
-    someone else's. .git/description is written once, by the clone."""
-    git = Path(directory) / ".git"
-    if not git.is_dir() or git.is_symlink():
-        return None
-    url = commit = None
-    try:
-        config = (git / "config").read_bytes()[:64 * 1024].decode("utf-8", "replace")
-        match = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', config)
-        url = match.group(1) if match else None
-        head = (git / "HEAD").read_bytes()[:256].decode("utf-8", "replace").strip()
-        if head.startswith("ref: "):
-            ref = head[5:]
-            if re.fullmatch(r"refs/[A-Za-z0-9._/-]{1,200}", ref) and ".." not in ref:
-                ref_file = git / ref
-                if ref_file.is_file():
-                    head = ref_file.read_bytes()[:64].decode("ascii", "replace").strip()
-                else:
-                    packed = (git / "packed-refs").read_bytes()[:1024 * 1024].decode("utf-8", "replace") \
-                        if (git / "packed-refs").is_file() else ""
-                    found = re.search(r"^([0-9a-f]{40}) " + re.escape(ref) + "$", packed, re.MULTILINE)
-                    head = found.group(1) if found else ""
-        commit = head[:7] if re.fullmatch(r"[0-9a-f]{40}", head) else None
-    except OSError:
-        pass
-    try:
-        cloned = int((git / "description").stat().st_mtime)
-    except OSError:
-        cloned = None
-    return {"url": url, "commit": commit, "cloned": cloned}
-
-
 def app_facts(app):
     """Facts of a desktop entry or AppImage as a dict (see the page for labels)."""
     address = web_address(app)
@@ -198,15 +149,13 @@ def app_facts(app):
              "command": short(app.get("exec", ""))}
     facts["roles"] = default_roles(app)
     if address:
-        # The launcher script belongs to Omarchy; the app is the web address.
+        # The launcher script is the browser's; the app is the web address.
         facts["website"] = short(address)
-        facts["omarchy"] = omarchy_origin(app)
         return facts
     program = program_path(app)
     facts["program"] = program
     owner = package_owner(program) or package_owner(app.get("desktop_path"))
     info = package_info(owner) if owner else None
-    facts["omarchy"] = omarchy_origin(app, owner)
     if info:
         facts["package"] = info
     elif program:
@@ -218,32 +167,8 @@ def app_facts(app):
     return facts
 
 
-def plugin_facts(plugin, manifests):
-    """Facts of a shell plugin: manifest, folder, size, source."""
-    directory, manifest = manifests.get(plugin.get("plugin_id"), (None, None))
-    facts = {"kind": "widget" if plugin.get("bar_widget") else "plugin",
-             "id": plugin.get("plugin_id", ""), "in_bar": plugin.get("in_bar")}
-    if manifest:
-        for key in ("version", "author", "license"):
-            if isinstance(manifest.get(key), str):
-                facts[key] = short(manifest[key], 80)
-    if directory:
-        facts["omarchy"] = omarchy_origin({"plugin_dir": str(directory)})
-        facts["folder"] = str(directory)
-        facts["size"], facts["size_complete"] = folder_size(directory)
-        source = git_source(directory)
-        if source:
-            facts["source"] = source
-        owner = package_owner(str(Path(directory) / "manifest.json"))
-        info = package_info(owner) if owner else None
-        if info:
-            facts["package"] = info
-    return facts
+# --- Default apps ---------------------------------------------------------------
 
-
-# --- Omarchy defaults -----------------------------------------------------------
-
-OMARCHY_ROOT = Path(os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy")
 CONFIG_HOME = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 MAX_LIST_BYTES = 256 * 1024
 
@@ -268,43 +193,12 @@ def _read_lines(path):
         return []
 
 
-def omarchy_packages(root=OMARCHY_ROOT):
-    """(packages Omarchy installs, packages it offers or installs later)."""
-    def names(name):
-        return {line.strip() for line in _read_lines(root / "install" / name)
-                if line.strip() and not line.lstrip().startswith("#")}
-    return names("omarchy-base.packages"), names("omarchy-other.packages")
-
-
-def omarchy_origin(app, package=None, root=OMARCHY_ROOT):
-    """How an app or plugin came with Omarchy: "bundled" (Omarchy's own
-    launcher entry, e.g. its web apps), "installed" (a package Omarchy
-    installs), "optional" (one it offers), "builtin" (a shell plugin that
-    is part of Omarchy) or None."""
-    folder = app.get("plugin_dir")
-    if folder:
-        try:
-            if Path(folder).resolve().is_relative_to(root.resolve()):
-                return "builtin"
-        except (OSError, ValueError):
-            pass
-    desktop = Path(app.get("desktop_path") or "").name
-    if desktop and (root / "applications" / desktop).is_file():
-        return "bundled"
-    if package:
-        base, other = omarchy_packages(root)
-        if package in base:
-            return "installed"
-        if package in other:
-            return "optional"
-    return None
-
-
 def _mime_defaults(config_home=CONFIG_HOME):
     """mime -> first default desktop id, from the user's mimeapps.list files
     (the first file that names a type wins, as in the XDG spec)."""
     found = {}
-    for path in (config_home / "mimeapps.list", Path.home() / ".local/share/applications/mimeapps.list"):
+    for path in (config_home / "gnome-mimeapps.list", config_home / "mimeapps.list",
+                 Path.home() / ".local/share/applications/mimeapps.list"):
         section = None
         for line in _read_lines(path):
             line = line.strip()
@@ -317,10 +211,10 @@ def _mime_defaults(config_home=CONFIG_HOME):
     return found
 
 
-def default_terminal(config_home=CONFIG_HOME, root=OMARCHY_ROOT):
-    """The first terminal of xdg-terminal-exec's lists (Omarchy's default last)."""
-    for path in (config_home / "hyprland-xdg-terminals.list", config_home / "xdg-terminals.list",
-                 root / "default/xdg-terminal-exec/hyprland-xdg-terminals.list"):
+def default_terminal(config_home=CONFIG_HOME):
+    """The first terminal of xdg-terminal-exec's lists (GNOME's, then the
+    general one), or None."""
+    for path in (config_home / "gnome-xdg-terminals.list", config_home / "xdg-terminals.list"):
         for line in _read_lines(path):
             line = line.strip()
             if line and not line.startswith("#"):
@@ -328,81 +222,87 @@ def default_terminal(config_home=CONFIG_HOME, root=OMARCHY_ROOT):
     return None
 
 
-def default_roles(app, config_home=CONFIG_HOME, root=OMARCHY_ROOT):
+def default_roles(app, config_home=CONFIG_HOME):
     """Roles this app is the default app for: browser, email, terminal, …"""
     desktop = Path(app.get("desktop_path") or "").name
     if not desktop:
         return []
     defaults = _mime_defaults(config_home)
     roles = [role for role, mimes in ROLE_MIMES if any(defaults.get(m) == desktop for m in mimes)]
-    if default_terminal(config_home, root) == desktop:
+    if default_terminal(config_home) == desktop:
         roles.insert(1 if roles[:1] == ["browser"] else 0, "terminal")
     return roles
 
 
 # --- Grouping by origin ---------------------------------------------------------
 
-PACMAN_FILES_LIMIT = 16 * 1024 * 1024
-_origin_cache = {"key": None, "index": None}
+USER_DATA = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
 
 
-def omarchy_index(db=PACMAN_DB, root=OMARCHY_ROOT):
-    """(desktop file names, program paths) shipped by the packages Omarchy
-    installs or offers, read from pacman's local database. Cached until the
-    database or Omarchy's package lists change (about 0.02 s to build)."""
-    try:
-        key = (db.stat().st_mtime_ns, (root / "install/omarchy-base.packages").stat().st_mtime_ns)
-    except OSError:
-        key = None
-    if key is not None and _origin_cache["key"] == key:
-        return _origin_cache["index"]
-    base, other = omarchy_packages(root)
-    names = base | other
-    desktops, programs = set(), set()
-    try:
-        entries = list(db.iterdir())
-    except OSError:
-        entries = []
-    for directory in entries:
-        if directory.name.rsplit("-", 2)[0] not in names:
-            continue
-        try:
-            with open(directory / "files", "rb") as fh:
-                data = fh.read(PACMAN_FILES_LIMIT)
-        except OSError:
-            continue
-        for line in data.decode("utf-8", "replace").splitlines():
-            if line.startswith("usr/share/applications/") and line.endswith(".desktop"):
-                desktops.add(line.rsplit("/", 1)[1])
-            elif line.startswith("usr/bin/") and not line.endswith("/"):
-                programs.add("/" + line)
-    index = (frozenset(desktops), frozenset(programs))
-    _origin_cache.update(key=key, index=index)
-    return index
-
-
-def default_desktops(config_home=CONFIG_HOME, root=OMARCHY_ROOT):
+def default_desktops(config_home=CONFIG_HOME):
     """Desktop file names that are one of the user's default apps."""
     defaults = _mime_defaults(config_home)
     found = {defaults[m] for _role, mimes in ROLE_MIMES for m in mimes if defaults.get(m)}
-    terminal = default_terminal(config_home, root)
+    terminal = default_terminal(config_home)
     return found | {terminal} if terminal else found
 
 
-def origin_section(app, index, defaults, root=OMARCHY_ROOT):
-    """"defaults" (one of the user's default apps), "omarchy" (came with
-    Omarchy) or "other". A default app that also came with Omarchy counts
-    as a default: that is the more specific fact."""
-    if "plugin_id" in app:
-        return "omarchy" if omarchy_origin({"plugin_dir": app.get("plugin_dir")}, root=root) == "builtin" else "other"
-    desktop = Path(app.get("desktop_path") or "").name
+def origin_section(app, defaults, user_data=USER_DATA):
+    """"defaults" (one of the user's default apps), "flatpak" (Flatpak or
+    Snap), "user" (your own: entries in your home, AppImages, web apps,
+    command-line tools) or "system" (installed system-wide, by the package
+    manager). A default app counts as a default: the more specific fact."""
+    desktop_path = app.get("desktop_path") or ""
+    desktop = Path(desktop_path).name
     if desktop and desktop in defaults:
         return "defaults"
-    desktops, programs = index
-    if desktop and (desktop in desktops or (root / "applications" / desktop).is_file()):
-        return "omarchy"
-    if not web_address(app):
-        program = program_path(app)
-        if program and program in programs:
-            return "omarchy"
-    return "other"
+    if app.get("sandboxed") or "/flatpak/" in desktop_path or "/snapd/" in desktop_path:
+        return "flatpak"
+    if not desktop_path or app.get("pwa") or web_address(app):
+        return "user"
+    try:
+        if Path(desktop_path).resolve().is_relative_to(Path(user_data).resolve()):
+            return "user"
+    except (OSError, ValueError):
+        pass
+    return "system"
+
+
+# --- Uninstalling ---------------------------------------------------------------
+
+_FLATPAK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$")
+
+
+def uninstall_plan(app, user_data=USER_DATA, look_up_package=True):
+    """How app is uninstalled, or None when the launcher cannot:
+    ("webapp", browser): only its browser can (a note, no button);
+    ("flatpak", app id): `flatpak uninstall`;
+    ("package", name): pacman, in a terminal (it asks for the password);
+    ("trash", path): your own desktop entry or AppImage, to the trash.
+    look_up_package=False skips asking pacman (fast, for a menu): a
+    system-wide entry is then ("package", None)."""
+    from launcher_core import browser_web_app
+    if app.get("cli_command"):
+        return None  # Installed with mise or npm: removed there.
+    browser = browser_web_app(app)
+    if browser:
+        return "webapp", browser
+    desktop_path = app.get("desktop_path") or ""
+    if app.get("sandboxed") and "/flatpak/" in desktop_path:
+        app_id = Path(desktop_path).name.removesuffix(".desktop")
+        return ("flatpak", app_id) if _FLATPAK_ID_RE.match(app_id) else None
+    if not desktop_path:
+        argv = app.get("argv") or []
+        if len(argv) == 1 and Path(argv[0]).is_absolute() and Path(argv[0]).is_file():
+            return "trash", argv[0]  # A standalone AppImage.
+        return None
+    try:
+        own = Path(desktop_path).resolve().is_relative_to(Path(user_data).resolve() / "applications")
+    except (OSError, ValueError):
+        own = False
+    if own:
+        return "trash", desktop_path
+    if not look_up_package:
+        return "package", None
+    owner = package_owner(desktop_path)
+    return ("package", owner) if owner else None

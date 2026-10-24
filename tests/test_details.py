@@ -1,5 +1,4 @@
-"""Details page facts: pacman database parsing, plugin folders, bounded walks."""
-import os
+"""Details page facts: pacman database parsing, origins, default apps and uninstall plans."""
 import sys
 import tempfile
 import unittest
@@ -69,7 +68,7 @@ class DetailsTests(unittest.TestCase):
             self.assertIsNone(details.program_path({"exec": "'unclosed"}))
 
     def test_web_apps_and_terminal_apps(self):
-        youtube = {"exec": "omarchy-launch-webapp https://youtube.com/", "desktop_id": "YouTube"}
+        youtube = {"exec": "xdg-open https://youtube.com/", "desktop_id": "YouTube"}
         self.assertEqual(details.web_address(youtube), "https://youtube.com/")
         facts = details.app_facts(youtube)
         self.assertEqual((facts["kind"], facts["website"]), ("webapp", "https://youtube.com/"))
@@ -79,79 +78,68 @@ class DetailsTests(unittest.TestCase):
         self.assertIsNone(details.terminal_program(["xdg-terminal-exec", "-e", "bash", "-c", "dua i /"]))
         self.assertIsNone(details.terminal_program(["chromium", "-e", "x"]))
 
-    def test_folder_size_does_not_follow_links_and_stops(self):
+class DefaultAppTests(unittest.TestCase):
+    def test_default_roles(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "a").write_bytes(b"x" * 100)
-            (root / "big").mkdir()
-            (root / "loop").symlink_to(root)
-            size, complete = details.folder_size(root)
-            self.assertTrue(complete)
-            self.assertLess(size, 1000)
-            for i in range(30):
-                (root / "big" / str(i)).write_text("y")
-            self.assertEqual(details.folder_size(root, limit=10)[1], False)
-
-    def test_git_source_reads_files_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            git = Path(tmp) / ".git"
-            (git / "refs/heads").mkdir(parents=True)
-            (git / "config").write_text('[remote "origin"]\n\turl = https://github.com/a/b.git\n')
-            (git / "HEAD").write_text("ref: refs/heads/main\n")
-            (git / "refs/heads/main").write_text("0123456789abcdef0123456789abcdef01234567\n")
-            (git / "description").write_text("x")
-            source = details.git_source(tmp)
-            self.assertEqual(source["url"], "https://github.com/a/b.git")
-            self.assertEqual(source["commit"], "0123456")
-            (git / "HEAD").write_text("ref: refs/../../etc/passwd\n")
-            self.assertIsNone(details.git_source(tmp)["commit"])
-
-
-class OmarchyDefaultTests(unittest.TestCase):
-    def test_origin_and_default_roles(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root, config = Path(tmp) / "omarchy", Path(tmp) / "config"
-            (root / "install").mkdir(parents=True)
-            (root / "applications").mkdir()
-            (root / "default/xdg-terminal-exec").mkdir(parents=True)
-            (root / "install/omarchy-base.packages").write_text("# list\nchromium\nfoot\n")
-            (root / "install/omarchy-other.packages").write_text("kdenlive\n")
-            (root / "applications/HEY.desktop").write_text("")
-            (root / "default/xdg-terminal-exec/hyprland-xdg-terminals.list").write_text("# x\nfoot.desktop\n")
-            config.mkdir()
+            config = Path(tmp)
             (config / "mimeapps.list").write_text("[Added Associations]\ntext/plain=evil.desktop\n"
                                                   "[Default Applications]\nx-scheme-handler/http=google-chrome.desktop;chromium.desktop\n"
                                                   "text/plain=micro.desktop\n")
-            o = lambda app, pkg=None: details.omarchy_origin(app, pkg, root)
-            self.assertEqual(o({"desktop_path": "/x/HEY.desktop"}), "bundled")
-            self.assertEqual(o({"desktop_path": "/x/chromium.desktop"}, "chromium"), "installed")
-            self.assertEqual(o({"desktop_path": "/x/kdenlive.desktop"}, "kdenlive"), "optional")
-            self.assertIsNone(o({"desktop_path": "/x/google-chrome.desktop"}, "google-chrome"))
-            self.assertEqual(o({"plugin_dir": str(root / "shell/plugins/x")}), "builtin")
-            roles = lambda name: details.default_roles({"desktop_path": "/x/" + name}, config, root)
+            roles = lambda name: details.default_roles({"desktop_path": "/x/" + name}, config)
             self.assertEqual(roles("google-chrome.desktop"), ["browser"])
             self.assertEqual(roles("chromium.desktop"), [])   # second choice only
             self.assertEqual(roles("micro.desktop"), ["editor"])
             self.assertEqual(roles("evil.desktop"), [])       # an association, not a default
-            self.assertEqual(roles("foot.desktop"), ["terminal"])
-            (config / "xdg-terminals.list").write_text("kitty.desktop\n")
-            self.assertEqual(roles("foot.desktop"), [])
+            self.assertEqual(roles("org.gnome.Ptyxis.desktop"), [])
+            (config / "xdg-terminals.list").write_text("# mine\norg.gnome.Ptyxis.desktop\n")
+            self.assertEqual(roles("org.gnome.Ptyxis.desktop"), ["terminal"])
+            # GNOME's own list wins over the general one.
+            (config / "gnome-xdg-terminals.list").write_text("kitty.desktop\n")
+            self.assertEqual(roles("org.gnome.Ptyxis.desktop"), [])
 
     def test_origin_sections(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "applications").mkdir()
-            (root / "applications/HEY.desktop").write_text("")
-            index = (frozenset({"chromium.desktop"}), frozenset({"/usr/bin/foot"}))
-            defaults = {"google-chrome.desktop", "foot.desktop"}
-            section = lambda app: details.origin_section(app, index, defaults, root)
-            self.assertEqual(section({"desktop_path": "/a/google-chrome.desktop"}), "defaults")
-            self.assertEqual(section({"desktop_path": "/a/foot.desktop"}), "defaults")   # default wins
-            self.assertEqual(section({"desktop_path": "/a/chromium.desktop"}), "omarchy")
-            self.assertEqual(section({"desktop_path": "/a/HEY.desktop", "exec": "omarchy-launch-webapp https://hey.com"}), "omarchy")
-            self.assertEqual(section({"desktop_path": "/a/mine.desktop", "exec": "true"}), "other")
-            self.assertEqual(section({"plugin_id": "x", "plugin_dir": str(root / "shell/plugins/x")}), "omarchy")
-            self.assertEqual(section({"plugin_id": "y", "plugin_dir": "/home/u/.config/omarchy/plugins/y"}), "other")
+            data = Path(tmp) / "data"
+            (data / "applications").mkdir(parents=True)
+            defaults = {"google-chrome.desktop"}
+            section = lambda app: details.origin_section(app, defaults, data)
+            self.assertEqual(section({"desktop_path": "/usr/share/applications/google-chrome.desktop"}), "defaults")
+            self.assertEqual(section({"desktop_path": "/usr/share/applications/org.gnome.Maps.desktop"}), "system")
+            flatpak = "/var/lib/flatpak/exports/share/applications/com.mattjakeman.ExtensionManager.desktop"
+            self.assertEqual(section({"desktop_path": flatpak, "sandboxed": True}), "flatpak")
+            self.assertEqual(section({"desktop_path": str(data / "applications/mine.desktop")}), "user")
+            self.assertEqual(section({"desktop_path": "", "argv": ["/home/u/AppImages/x.AppImage"]}), "user")
+            self.assertEqual(section({"desktop_path": "/usr/share/applications/yt.desktop",
+                                      "exec": "xdg-open https://youtube.com"}), "user")
+
+
+class UninstallPlanTests(unittest.TestCase):
+    def test_plans(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = Path(tmp) / "data"
+            (data / "applications").mkdir(parents=True)
+            own = data / "applications" / "mine.desktop"
+            own.write_text("")
+            appimage = Path(tmp) / "x.AppImage"
+            appimage.write_text("")
+            plan = lambda app, **kw: details.uninstall_plan(app, data, **kw)
+            self.assertEqual(plan({"desktop_path": str(own)}), ("trash", str(own)))
+            self.assertEqual(plan({"desktop_path": "", "argv": [str(appimage)]}), ("trash", str(appimage)))
+            self.assertIsNone(plan({"desktop_path": "", "argv": ["xdg-terminal-exec", "-e", "claude"],
+                                    "cli_command": "claude"}))
+            flatpak = "/var/lib/flatpak/exports/share/applications/org.gnome.Maps.desktop"
+            self.assertEqual(plan({"desktop_path": flatpak, "sandboxed": True}), ("flatpak", "org.gnome.Maps"))
+            self.assertIsNone(plan({"desktop_path": "/var/lib/flatpak/exports/share/applications/-rf.desktop",
+                                    "sandboxed": True}))
+            web = {"desktop_path": str(own), "exec": "/opt/google/chrome/google-chrome --profile-directory=Default "
+                                                   "--app-id=abcdefghijklmnopabcdefghijklmnop"}
+            self.assertEqual(plan(web)[0], "webapp")
+            system = {"desktop_path": "/usr/share/applications/org.gnome.Maps.desktop"}
+            self.assertEqual(plan(system, look_up_package=False), ("package", None))
+            with mock.patch.object(details, "package_owner", return_value="gnome-maps"):
+                self.assertEqual(plan(system), ("package", "gnome-maps"))
+            with mock.patch.object(details, "package_owner", return_value=None):
+                self.assertIsNone(plan(system))
 
 
 if __name__ == "__main__":

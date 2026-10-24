@@ -1,422 +1,272 @@
+"""GNOME shortcuts: accelerators, who owns a key, writing custom keybindings
+and giving taken keys back."""
+import json
 import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
-import unittest.mock
 from pathlib import Path
 
-import shortcuts
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+import shortcuts  # noqa: E402
 
-LIVE = """bindd
-\tmodmask: 64
-\tsubmap:
-\tkey: F
-\tkeycode: 0
-\tdescription: Full screen
-
-bindd
-\tmodmask: 64
-\tsubmap:
-\tkey: SUPER + code:10
-\tkeycode: 0
-\tdescription: Switch to workspace 1
-
-bindd
-\tmodmask: 65
-\tsubmap:
-\tkey: B
-\tkeycode: 0
-\tdescription: Brave
-
-bindd
-\tmodmask: 64
-\tsubmap: resize
-\tkey: R
-\tkeycode: 0
-\tdescription: Inside a submap
-"""
-
-USER = '''hl.unbind("SUPER + SHIFT + B")
-o.bind("SUPER + SHIFT + B", "Brave", { launch = "brave" })
-o.bind("SUPER + SHIFT + Z", "Gone", { launch = "zed" })
-hl.unbind("SUPER + SHIFT + Z")
--- o.bind("SUPER + SHIFT + Q", "Commented", "true")
-'''
+BASE = shortcuts.CUSTOM_BASE
 
 
-def combo(text):
-    return shortcuts.parse_combo(text)
+class FakeSettings:
+    """gsettings in a dict: GNOME's bindings and the custom keybindings."""
+
+    def __init__(self, strv=None, custom=None):
+        self.strv = {k: list(v) for k, v in (strv or {}).items()}
+        self.paths = list(custom or {})
+        self.custom = {p: dict(v) for p, v in (custom or {}).items()}
+
+    def available(self):
+        return True
+
+    def binding_keys(self):
+        return [(*where.split(":", 1), where.split(":", 1)[1].replace("-", " "), [a for a in accels if a])
+                for where, accels in self.strv.items()]
+
+    def get_strv(self, schema_id, key):
+        return list(self.strv.get(f"{schema_id}:{key}", []))
+
+    def set_strv(self, schema_id, key, values):
+        self.strv[f"{schema_id}:{key}"] = list(values)
+
+    def custom_paths(self):
+        return list(self.paths)
+
+    def set_custom_paths(self, paths):
+        self.paths = list(paths)
+
+    def read_custom(self, path):
+        return {"name": "", "command": "", "binding": "", **self.custom.get(path, {})}
+
+    def write_custom(self, path, values):
+        self.custom.setdefault(path, {}).update(values)
+
+    def reset_custom(self, path):
+        self.custom.pop(path, None)
+
+    def sync(self):
+        pass
 
 
-class ShortcutTests(unittest.TestCase):
+SHELL = "org.gnome.shell.keybindings"
+WM = "org.gnome.desktop.wm.keybindings"
+
+
+def state(**apps):
+    return {"apps": apps, "applied": []}
+
+
+def entry(name, launch, *combos, disabled=()):
+    return {"name": name, "launch": launch, "shortcuts": list(combos), "disabled": list(disabled)}
+
+
+class AcceleratorTests(unittest.TestCase):
+    def test_round_trip(self):
+        combo = shortcuts.make_combo(["SHIFT", "SUPER"], "b")
+        self.assertEqual(combo, {"mods": ["SUPER", "SHIFT"], "key": "B"})
+        self.assertEqual(shortcuts.accelerator(combo), "<Super><Shift>b")
+        self.assertEqual(shortcuts.parse_accelerator("<Super><Shift>b"), combo)
+        self.assertEqual(shortcuts.combo_label(combo), "Super + Shift + B")
+
+    def test_gnome_spellings(self):
+        self.assertEqual(shortcuts.parse_accelerator("<Primary><Alt>F2"), {"mods": ["CTRL", "ALT"], "key": "F2"})
+        self.assertEqual(shortcuts.parse_accelerator("<Ctrl><Shift><Alt>R")["mods"], ["SHIFT", "CTRL", "ALT"])
+        self.assertEqual(shortcuts.parse_accelerator("XF86AudioPlay"), {"mods": [], "key": "XF86AudioPlay"})
+        self.assertEqual(shortcuts.parse_accelerator("<Super>Page_Down")["key"], "Page_Down")
+        for bad in ("", "<Hyper>a", "<Super>", "<Super>a b", "<Super>;rm"):
+            self.assertIsNone(shortcuts.parse_accelerator(bad), bad)
+
+    def test_same_key_however_written(self):
+        a, b = shortcuts.parse_accelerator("<Control>t"), shortcuts.parse_accelerator("<Primary>T")
+        self.assertEqual(shortcuts.combo_id(a), shortcuts.combo_id(b))
+
+
+class BindingsTests(unittest.TestCase):
+    def bindings(self, st=None, favorites=(), **kw):
+        settings = FakeSettings(**kw)
+        return shortcuts.Bindings(st or state(), shortcuts.read_desktop_binds(settings),
+                                  shortcuts.read_custom_binds(settings), favorites, ["SUPER", "SHIFT"])
+
+    def test_levels(self):
+        combo = shortcuts.make_combo(["SUPER"], "A")
+        b = self.bindings(strv={f"{SHELL}:toggle-application-view": ["<Super>a"]},
+                          custom={BASE + "custom0/": {"name": "Notes", "command": "gnome-text-editor",
+                                                      "binding": "<Super><Alt>n"}})
+        self.assertEqual(b.classify(combo, "x"), (shortcuts.DESKTOP, "toggle application view"))
+        self.assertEqual(b.taken_from(combo), f"{SHELL}:toggle-application-view")
+        self.assertEqual(b.classify(shortcuts.make_combo(["SUPER", "ALT"], "N"), "x")[0], shortcuts.CUSTOM)
+        self.assertEqual(b.classify(shortcuts.make_combo(["SUPER", "ALT"], "Q"), "x"), (shortcuts.FREE, ""))
+
+    def test_launcher_owner_and_retarget(self):
+        combo = {**shortcuts.make_combo(["SUPER", "SHIFT"], "F"), "action": "", "taken_from": "", "replaces": ""}
+        st = state(**{"/a/firefox.desktop": entry("Firefox", ["/a/firefox.desktop"], combo)})
+        b = self.bindings(st)
+        self.assertEqual(b.classify(combo, "/a/firefox.desktop"), (shortcuts.SAME, "Firefox"))
+        self.assertEqual(b.classify(combo, "/a/firefox.desktop", action="private")[0], shortcuts.RETARGET)
+        self.assertEqual(b.classify(combo, "/b/other.desktop"), (shortcuts.LAUNCHER, "Firefox"))
+
+    def test_launchers_own_keys_are_not_counted_twice(self):
+        b = self.bindings(custom={BASE + "gnome-launcher-0/": {"binding": "<Super>x", "command": "gio launch /a"}})
+        self.assertEqual(b.custom, [])
+
+    def test_dash_position_shortcut_opens_a_favorite(self):
+        app = {"name": "Files", "desktop_path": "/usr/share/applications/org.gnome.Nautilus.desktop", "exec": "nautilus"}
+        b = self.bindings(favorites=["firefox.desktop", "org.gnome.Nautilus.desktop"],
+                          strv={f"{SHELL}:open-new-window-application-2": ["<Super><Control>2"],
+                                f"{SHELL}:switch-to-application-2": ["<Super>2"],
+                                f"{SHELL}:switch-to-application-1": ["<Super>1"]})
+        found = b.external_shortcuts(app)
+        self.assertEqual([shortcuts.combo_label(x["combo"]) for x in found], ["Super + 2", "Super + Ctrl + 2"])
+        self.assertEqual(b.classify(shortcuts.make_combo(["SUPER"], "2"), "k", app=app)[0], shortcuts.SAME)
+
+    def test_custom_shortcut_that_opens_the_app(self):
+        app = {"name": "Editor", "desktop_path": "/usr/share/applications/org.gnome.TextEditor.desktop",
+               "exec": "gnome-text-editor %U"}
+        b = self.bindings(custom={BASE + "c0/": {"name": "Edit", "command": "gnome-text-editor --new-window",
+                                                 "binding": "<Super>e"},
+                                  BASE + "c1/": {"name": "Shell", "command": "sh -c gnome-text-editor",
+                                                 "binding": "<Super>w"}})
+        self.assertEqual([x["description"] for x in b.external_shortcuts(app)], ["Edit"])
+
+    def test_suggestions_skip_taken_letters(self):
+        b = self.bindings(strv={f"{WM}:x": ["<Super><Shift>f"]})
+        found = b.suggestions({"name": "Firefox"}, "k", ["SUPER", "ALT"], 3)
+        self.assertNotIn("F", [c["key"] for c in found])
+        self.assertEqual(len(found), 3)
+
+
+class ApplyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        path = Path(self.tmp.name) / "bindings.lua"
-        path.write_text(USER)
-        self.user = shortcuts.parse_user_binds([path])
-        self.live = shortcuts.parse_live_binds(LIVE)
+        self.state_file = Path(self.tmp.name) / "shortcuts.json"
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def bindings(self, state=None, defaults=(), default_apps=None):
-        return shortcuts.Bindings(state or {"apps": {}}, live=self.live, user=self.user,
-                                  defaults=list(defaults), main_mods=["SUPER", "SHIFT"],
-                                  default_apps=default_apps or {"terminal": "", "browser": "", "editor": ""})
+    def apply(self, settings, st):
+        shortcuts.save_and_apply(st, settings, self.state_file)
+        return shortcuts.load_state(self.state_file)
 
-    def test_parse_combo_normalizes_modifiers_and_rejects_junk(self):
-        self.assertEqual(combo("alt + super + f"), {"mods": ["SUPER", "ALT"], "key": "F"})
-        self.assertEqual(combo("SUPER, code:10")["key"], "code:10")
-        self.assertIsNone(combo("SUPER + HYPER + F"))
-        self.assertIsNone(combo('SUPER + F") os.execute("x'))
+    def test_writes_own_keybindings_and_keeps_the_users(self):
+        users = {BASE + "custom0/": {"name": "Mine", "command": "foo", "binding": "<Super>m"}}
+        settings = FakeSettings(custom=users)
+        combo = {**shortcuts.make_combo(["SUPER", "SHIFT"], "F"), "action": "", "taken_from": "", "replaces": ""}
+        private = {**shortcuts.make_combo(["SUPER", "SHIFT"], "P"), "action": "new-private-window",
+                   "label": "New Private Window", "taken_from": "", "replaces": ""}
+        self.apply(settings, state(**{"/a/firefox.desktop": entry("Firefox", ["/a/firefox.desktop"], combo, private)}))
+        own = [p for p in settings.paths if "gnome-launcher-" in p]
+        self.assertEqual(settings.paths[0], BASE + "custom0/")
+        self.assertEqual(len(own), 2)
+        written = {settings.custom[p]["binding"]: settings.custom[p] for p in own}
+        self.assertEqual(written["<Super><Shift>f"]["command"], "gio launch /a/firefox.desktop")
+        self.assertIn("launch_entry.py /a/firefox.desktop new-private-window", written["<Super><Shift>p"]["command"])
+        self.assertEqual(written["<Super><Shift>p"]["name"], "Firefox: New Private Window")
+        # Removing every shortcut removes the launcher's keybindings, not the user's.
+        self.apply(settings, state())
+        self.assertEqual(settings.paths, [BASE + "custom0/"])
+        self.assertEqual(set(settings.custom), {BASE + "custom0/"})
 
-    def test_live_binds_skip_submaps_and_read_keycodes(self):
-        keys = {(b["mask"], b["key"]) for b in self.live}
-        self.assertEqual(keys, {(64, "f"), (64, "code:10"), (65, "b")})
+    def test_taken_keys_go_back_when_the_shortcut_goes(self):
+        settings = FakeSettings(strv={f"{SHELL}:switch-to-application-1": ["<Super>1"],
+                                      f"{WM}:switch-applications": ["<Super>Tab", "<Alt>Tab"]})
+        one = {**shortcuts.make_combo(["SUPER"], "1"), "action": "", "replaces": "x",
+               "taken_from": f"{SHELL}:switch-to-application-1"}
+        tab = {**shortcuts.make_combo(["SUPER"], "Tab"), "action": "", "replaces": "x",
+               "taken_from": f"{WM}:switch-applications"}
+        saved = self.apply(settings, state(a=entry("A", ["/a.desktop"], one, tab)))
+        self.assertEqual(settings.strv[f"{SHELL}:switch-to-application-1"], [])
+        self.assertEqual(settings.strv[f"{WM}:switch-applications"], ["<Alt>Tab"])
+        self.assertEqual(len(saved["applied"]), 2)
+        # The snapshot no longer sees GNOME owning the taken keys.
+        bindings = shortcuts.Bindings(saved, shortcuts.read_desktop_binds(settings), [], [], ["SUPER"])
+        self.assertEqual(bindings.owner(one)[0], shortcuts.FREE)
+        saved = self.apply(settings, state(a=entry("A", ["/a.desktop"], tab)))
+        self.assertEqual(settings.strv[f"{SHELL}:switch-to-application-1"], ["<Super>1"])
+        self.assertEqual(saved["applied"], [{"where": f"{WM}:switch-applications", "accel": "<Super>Tab"}])
+        self.apply(settings, state())
+        self.assertEqual(settings.strv[f"{WM}:switch-applications"], ["<Alt>Tab", "<Super>Tab"])
 
-    def test_user_binds_respect_line_order(self):
-        binds, unbinds = self.user
-        self.assertEqual([shortcuts.combo_label(b["combo"]) for b in binds], ["Super + Shift + B"])
-        self.assertIn(shortcuts.combo_id(combo("SUPER + SHIFT + Z")), unbinds)
+    def test_turning_off_a_custom_shortcut_and_back_on(self):
+        path = BASE + "custom3/"
+        settings = FakeSettings(custom={path: {"name": "Term", "command": "ptyxis", "binding": "<Super>Return"}})
+        off = {**shortcuts.make_combo(["SUPER"], "Return"), "description": "Term", "source": "Custom",
+               "where": "custom:" + path}
+        self.apply(settings, state(t=entry("Terminal", ["/t.desktop"], disabled=[off])))
+        self.assertEqual(settings.custom[path]["binding"], "")
+        self.apply(settings, state())
+        self.assertEqual(settings.custom[path]["binding"], "<Super>Return")
 
-    def test_classification_levels(self):
-        b = self.bindings()
-        self.assertEqual(b.classify(combo("SUPER + ALT + K"), "app")[0], shortcuts.FREE)
-        self.assertEqual(b.classify(combo("SUPER + SHIFT + B"), "app"), (shortcuts.CUSTOM, "Brave"))
-        self.assertEqual(b.classify(combo("SUPER + F"), "app"), (shortcuts.OMARCHY, "Full screen"))
-        # A keysym bind is found through the physical keycode as well.
-        self.assertEqual(b.classify(combo("SUPER + 1"), "app", keycode=10)[0], shortcuts.OMARCHY)
+    def test_a_key_the_user_rebound_meanwhile_is_not_overwritten(self):
+        settings = FakeSettings(strv={f"{SHELL}:toggle-quick-settings": ["<Super>s"]})
+        combo = {**shortcuts.make_combo(["SUPER"], "S"), "action": "", "replaces": "x",
+                 "taken_from": f"{SHELL}:toggle-quick-settings"}
+        self.apply(settings, state(a=entry("A", ["/a.desktop"], combo)))
+        settings.strv[f"{SHELL}:toggle-quick-settings"] = ["<Super>q"]  # Changed in GNOME Settings.
+        self.apply(settings, state())
+        self.assertEqual(settings.strv[f"{SHELL}:toggle-quick-settings"], ["<Super>q", "<Super>s"])
 
-    def test_launcher_owned_combos(self):
-        state = {"apps": {"a": {"name": "Alpha", "launch": ["/a.desktop"], "disabled": [],
-                                "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "K", "replaces": ""}]}}}
-        b = self.bindings(state)
-        self.assertEqual(b.classify(combo("SUPER + ALT + K"), "a")[0], shortcuts.SAME)
-        self.assertEqual(b.classify(combo("SUPER + ALT + K"), "b"), (shortcuts.LAUNCHER, "Alpha"))
+    def test_hostile_state_file_is_cleaned(self):
+        self.state_file.write_text(json.dumps({
+            "apps": {"x": {"name": "X", "launch": ["/x.desktop"],
+                           "shortcuts": [{"mods": ["SUPER"], "key": "x;rm", "action": ""},
+                                         {"mods": ["SUPER"], "key": "y", "action": "../evil",
+                                          "taken_from": "/etc/passwd"}],
+                           "disabled": [{"mods": ["SUPER"], "key": "z", "where": "custom:/elsewhere/"}]}},
+            "applied": [{"where": "org.gnome.shell.keybindings:x", "accel": "<Super>"}]}))
+        loaded = shortcuts.load_state(self.state_file)
+        combo = loaded["apps"]["x"]["shortcuts"]
+        self.assertEqual([(c["key"], c["action"], c["taken_from"]) for c in combo], [("Y", "", "")])
+        self.assertEqual(loaded["apps"]["x"]["disabled"], [])
+        self.assertEqual(loaded["applied"], [])
 
-    def test_suggestions_are_free(self):
-        b = self.bindings()
-        found = b.suggestions({"name": "Firefox"}, "app")
-        self.assertTrue(found)
-        for item in found:
-            self.assertEqual(b.classify(item, "app")[0], shortcuts.FREE)
 
-    def test_suggestions_follow_selected_modifiers(self):
-        b = self.bindings()
-        found = b.suggestions({"name": "Brave"}, "app", ["SUPER", "CTRL"])
-        self.assertTrue(found)
-        self.assertTrue(all(c["mods"] == ["SUPER", "CTRL"] for c in found))
-        # B is taken with Super + Shift, so it is not offered with other modifiers either.
-        self.assertNotIn("B", [c["key"] for c in found])
-        self.assertIn("R", [c["key"] for c in found])
-        self.assertEqual([c["key"] for c in found], sorted(c["key"] for c in found))
-        self.assertNotIn("F", [c["key"] for c in b.suggestions({"name": "Firefox"}, "app", ["SUPER"])])
-        # Super + F is taken, but not with the main modifiers, so F is offered elsewhere.
-        self.assertIn("F", [c["key"] for c in b.suggestions({"name": "Firefox"}, "app", ["SUPER", "ALT"])])
+class CommandTests(unittest.TestCase):
+    def test_commands_glib_can_split(self):
+        self.assertEqual(shortcuts.shortcut_command(["/usr/share/applications/My App.desktop"]),
+                         "gio launch '/usr/share/applications/My App.desktop'")
+        self.assertEqual(shortcuts.shortcut_command(["/home/u/AppImages/x.AppImage", "--flag"]),
+                         "/home/u/AppImages/x.AppImage --flag")
 
-    def test_external_shortcuts_match_launch_command(self):
-        b = self.bindings()
-        found = b.external_shortcuts({"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"})
-        self.assertEqual([x["description"] for x in found], ["Brave"])
 
-    def test_external_shortcuts_include_live_omarchy_webapp_defaults(self):
-        path = Path(self.tmp.name) / "applications.lua"
-        path.write_text('o.bind("SUPER + SHIFT + Y", "YouTube", { webapp = "https://youtube.com/" })\n'
-                        'o.bind("SUPER + SHIFT + X", "X", { webapp = "https://x.com/" })\n'
-                        'o.bind("SUPER + SHIFT + B", "Browser", { omarchy = "browser" })\n')
-        defaults, _ = shortcuts.parse_user_binds([path])
-        self.live += shortcuts.parse_live_binds(
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: Y\n\tkeycode: 0\n\tdescription: YouTube\n")
-        b = self.bindings(defaults=defaults)
-        for app in ({"name": "YouTube", "exec": "omarchy-launch-webapp https://www.youtube.com"},
-                    {"name": "YouTube", "exec": "chrome --app-id=abc"}):
-            found = b.external_shortcuts(app)
-            self.assertEqual([(x["description"], x["file"]) for x in found], [("YouTube", "Omarchy")])
-        # X is not live (e.g. preinstalled bindings off), so it is not shown.
-        self.assertEqual(b.external_shortcuts({"name": "X", "exec": "omarchy-launch-webapp https://x.com/"}), [])
+@unittest.skipUnless(subprocess.run(["gsettings", "list-relocatable-schemas"], capture_output=True, text=True)
+                     .stdout.count(shortcuts.CUSTOM_SCHEMA), "GNOME's media-keys schema is not installed")
+class RealSchemaTests(unittest.TestCase):
+    """The real Gio backend against GNOME's installed schemas, in memory
+    (GSETTINGS_BACKEND=memory): nothing reaches the user's settings."""
 
-    def test_external_shortcuts_include_omarchy_launch_defaults(self):
-        path = Path(self.tmp.name) / "applications.lua"
-        path.write_text('o.bind("SUPER + SHIFT + F", "File manager", { omarchy = "nautilus" })\n'
-                        'o.bind("SUPER + ALT + SHIFT + F", "File manager (cwd)", { omarchy = "nautilus-cwd" })\n'
-                        'o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n')
-        defaults, _ = shortcuts.parse_user_binds([path])
-        self.live += shortcuts.parse_live_binds(
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: F\n\tkeycode: 0\n\tdescription: File manager\n\n"
-            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: F\n\tkeycode: 0\n\tdescription: File manager (cwd)\n\n"
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n")
-        b = self.bindings(defaults=defaults)
-        files = {"name": "Files", "exec": "nautilus --new-window", "desktop_id": "org.gnome.Nautilus"}
-        self.assertEqual([x["description"] for x in b.external_shortcuts(files)], ["File manager"])
-        brave = {"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"}
-        self.assertNotIn("Browser", [x["description"] for x in b.external_shortcuts(brave)])
-
-    def test_external_shortcuts_map_omarchy_terminal_to_default_terminal(self):
-        path = Path(self.tmp.name) / "applications.lua"
-        path.write_text('o.bind("SUPER + RETURN", "Terminal", { omarchy = "terminal" })\n')
-        defaults, _ = shortcuts.parse_user_binds([path])
-        self.live += shortcuts.parse_live_binds(
-            "bindd\n\tmodmask: 64\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Terminal\n")
-        foot = {"name": "Foot", "exec": "foot", "desktop_id": "foot"}
-        kitty = {"name": "kitty", "exec": "kitty", "desktop_id": "kitty"}
-        b = self.bindings(defaults=defaults, default_apps={"terminal": "foot", "browser": ""})
-        self.assertEqual([shortcuts.combo_label(x["combo"]) for x in b.external_shortcuts(foot)],
-                         ["Super + Enter"])
-        self.assertEqual(b.external_shortcuts(kitty), [])
-        self.assertEqual(self.bindings(defaults=defaults).external_shortcuts(foot), [])
-
-    def test_external_shortcuts_map_omarchy_browser_to_default_browser(self):
-        path = Path(self.tmp.name) / "applications.lua"
-        path.write_text('o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n'
-                        'o.bind("SUPER + SHIFT + ALT + B", "Browser (private)", { omarchy = "browser --private" })\n')
-        defaults, _ = shortcuts.parse_user_binds([path])
-        self.live += shortcuts.parse_live_binds(
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n\n"
-            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: B\n\tkeycode: 0\n\tdescription: Browser (private)\n")
-        chrome = {"name": "Google Chrome", "exec": "/usr/bin/google-chrome-stable %U",
-                  "desktop_id": "google-chrome"}
-        b = self.bindings(defaults=defaults, default_apps={"terminal": "", "browser": "google-chrome"})
-        # Only the plain browser bind: the private one opens an incognito window.
-        self.assertEqual([shortcuts.combo_label(x["combo"]) for x in b.external_shortcuts(chrome)],
-                         ["Super + Shift + Enter"])
-        self.assertEqual(self.bindings(defaults=defaults).external_shortcuts(chrome), [])
-
-    CHROME = {"name": "Google Chrome", "exec": "/usr/bin/google-chrome-stable", "desktop_id": "google-chrome",
-              "desktop_path": "/usr/share/applications/google-chrome.desktop",
-              "actions": [{"id": "new-window", "name": "New Window", "exec": "/usr/bin/google-chrome-stable"},
-                          {"id": "new-private-window", "name": "New Incognito Window",
-                           "exec": "/usr/bin/google-chrome-stable --incognito"}]}
-
-    def omarchy_defaults(self, text, live):
-        path = Path(self.tmp.name) / "applications.lua"
-        path.write_text(text)
-        defaults, _ = shortcuts.parse_user_binds([path])
-        self.live += shortcuts.parse_live_binds(live)
-        return defaults
-
-    def test_comments_do_not_cut_double_dashes_inside_strings(self):
-        self.assertEqual(shortcuts._strip_lua_comment('o.bind("A", "B", { omarchy = "browser --private" }) -- x'),
-                         'o.bind("A", "B", { omarchy = "browser --private" }) ')
-        self.assertEqual(shortcuts._strip_lua_comment('-- o.bind("A")'), "")
-
-    def test_omarchy_private_browser_maps_to_private_window_action(self):
-        defaults = self.omarchy_defaults(
-            'o.bind("SUPER + SHIFT + ALT + B", "Browser (private)", { omarchy = "browser --private" })\n',
-            "bindd\n\tmodmask: 73\n\tsubmap:\n\tkey: B\n\tkeycode: 0\n\tdescription: Browser (private)\n")
-        b = self.bindings(defaults=defaults, default_apps={"browser": "google-chrome"})
-        self.assertEqual([(shortcuts.combo_label(x["combo"]), x["action"]) for x in b.external_shortcuts(self.CHROME)],
-                         [("Super + Shift + Alt + B", "new-private-window")])
-
-    def test_default_browser_does_not_claim_its_web_apps(self):
-        defaults = self.omarchy_defaults(
-            'o.bind("SUPER + SHIFT + RETURN", "Browser", { omarchy = "browser" })\n',
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: RETURN\n\tkeycode: 0\n\tdescription: Browser\n")
-        b = self.bindings(defaults=defaults, default_apps={"browser": "google-chrome"})
-        pwa = {"name": "Netflix", "exec": "/opt/google/chrome/google-chrome --app-id=abc",
-               "desktop_id": "chrome-abc-Default"}
-        self.assertEqual(b.external_shortcuts(pwa), [])
-        self.assertEqual(len(b.external_shortcuts(self.CHROME)), 1)
-
-    def test_tui_and_editor_defaults_match_their_programs(self):
-        defaults = self.omarchy_defaults(
-            'o.bind("SUPER + CTRL + T", "Activity", { tui = "btop" })\n'
-            'o.bind("SUPER + SHIFT + N", "Editor", { omarchy = "editor" })\n',
-            "bindd\n\tmodmask: 68\n\tsubmap:\n\tkey: T\n\tkeycode: 0\n\tdescription: Activity\n\n"
-            "bindd\n\tmodmask: 65\n\tsubmap:\n\tkey: N\n\tkeycode: 0\n\tdescription: Editor\n")
-        b = self.bindings(defaults=defaults, default_apps={"editor": "nvim"})
-        btop = {"name": "btop++", "exec": "btop", "desktop_id": "btop"}
-        nvim = {"name": "Neovim", "exec": "nvim", "desktop_id": "nvim"}
-        self.assertEqual([x["description"] for x in b.external_shortcuts(btop)], ["Activity"])
-        self.assertEqual([x["description"] for x in b.external_shortcuts(nvim)], ["Editor"])
-
-    def test_user_bind_with_action_arguments_maps_to_that_action(self):
-        path = Path(self.tmp.name) / "mine.lua"
-        path.write_text('o.bind("SUPER + ALT + I", "Incognito", { launch = "google-chrome-stable --incognito" })\n')
-        b = self.bindings()
-        b.user_binds, b.user_unbinds = shortcuts.parse_user_binds([path])
-        self.assertEqual([x["action"] for x in b.external_shortcuts(self.CHROME)], ["new-private-window"])
-
-    def test_classify_treats_existing_same_binding_as_duplicate(self):
-        b = self.bindings()
-        brave = {"name": "Brave", "exec": "brave", "desktop_id": "brave-browser"}
-        self.assertEqual(b.classify(combo("SUPER + SHIFT + B"), "brave", app=brave)[0], shortcuts.SAME)
-        self.assertEqual(b.classify(combo("SUPER + SHIFT + B"), "brave")[0], shortcuts.CUSTOM)
-
-    def test_launcher_shortcut_with_other_action_is_a_retarget(self):
-        state = {"apps": {"chrome": {"name": "Google Chrome", "launch": ["/x/google-chrome.desktop"], "disabled": [],
-                                     "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "C", "action": ""}]}}}
-        b = self.bindings(state)
-        self.assertEqual(b.classify(combo("SUPER + ALT + C"), "chrome", action="new-private-window"),
-                         (shortcuts.RETARGET, ""))
-        self.assertEqual(b.classify(combo("SUPER + ALT + C"), "chrome")[0], shortcuts.SAME)
-
-    def test_render_lua_launches_desktop_actions(self):
-        state = {"apps": {"chrome": {"name": "Google Chrome", "launch": ["/x/google-chrome.desktop"], "disabled": [],
-                                     "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "I", "replaces": "",
-                                                    "action": "new-private-window"}]}}}
-        lua = shortcuts.render_lua(state)
-        self.assertIn('{ launch = "/x/google-chrome.desktop:new-private-window" }', lua)
-        self.assertEqual(shortcuts.shortcut_launch(["/a/b"], "x"), ["/a/b"])
-
-    def test_invalid_desktop_ids_launch_through_a_valid_alias(self):
-        # uwsm-app notifies "Invalid Desktop Entry ID" for names like Omarchy's
-        # "Google Maps.desktop"; a symlink with a valid name avoids it.
-        with tempfile.TemporaryDirectory() as tmp, \
-                unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", Path(tmp) / "ids"):
-            entry = Path(tmp) / "Google Maps.desktop"
-            entry.write_text("[Desktop Entry]\n")
-            alias = shortcuts.uwsm_desktop_arg(str(entry))
-            self.assertEqual(alias, str(Path(tmp) / "ids" / "Google-Maps.desktop"))
-            self.assertEqual(os.readlink(alias), str(entry))
-            self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), alias)
-            self.assertEqual(shortcuts.shortcut_launch([str(entry)], "new"), [f"{alias}:new"])
-            valid = str(Path(tmp) / "org.gnome.Nautilus.desktop")
-            self.assertEqual(shortcuts.uwsm_desktop_arg(valid), valid)
-            self.assertEqual(Path(shortcuts.uwsm_desktop_arg("/x/ éé.desktop")).name, "app.desktop")
-
-    def test_desktop_alias_needs_a_private_directory(self):
+    def test_round_trip_in_memory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            entry = Path(tmp) / "Google Maps.desktop"
-            entry.write_text("[Desktop Entry]\n")
-            real = Path(tmp) / "real"
-            real.mkdir()
-            linked = Path(tmp) / "linked"
-            linked.symlink_to(real)
-            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", linked):
-                self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), str(entry))
-            open_dir = Path(tmp) / "open"
-            open_dir.mkdir(mode=0o777)
-            open_dir.chmod(0o777)
-            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", open_dir):
-                self.assertEqual(shortcuts.uwsm_desktop_arg(str(entry)), str(entry))
-            self.assertEqual(list(real.iterdir()) + list(open_dir.iterdir()), [])
-            # A planted file or link at the alias name is replaced, never followed.
-            own = Path(tmp) / "own"
-            own.mkdir(mode=0o700)
-            victim = Path(tmp) / "victim"
-            victim.write_text("keep")
-            (own / "Google-Maps.desktop").symlink_to(victim)
-            with unittest.mock.patch.object(shortcuts, "DESKTOP_ALIAS_DIR", own):
-                alias = shortcuts.uwsm_desktop_arg(str(entry))
-            self.assertEqual(os.readlink(alias), str(entry))
-            self.assertEqual(victim.read_text(), "keep")
-            self.assertEqual(sorted(p.name for p in own.iterdir()), ["Google-Maps.desktop"])
-
-    def test_render_lua_unbinds_disabled_before_binding_reassigned_key(self):
-        state = {"apps": {
-            "files": {"name": "Files", "launch": ["/x/nautilus.desktop"], "disabled": [],
-                      "shortcuts": [{"mods": ["SUPER", "SHIFT"], "key": "F", "replaces": "", "action": ""}]},
-            "flea": {"name": "Flea", "launch": ["/x/flea.desktop"], "shortcuts": [],
-                     "disabled": [{"mods": ["SUPER", "SHIFT"], "key": "F", "description": "File manager"}]}}}
-        lua = shortcuts.render_lua(state)
-        self.assertLess(lua.rindex('hl.unbind("SUPER + SHIFT + F")'), lua.index('o.bind("SUPER + SHIFT + F"'))
-
-    def test_prune_missing_drops_uninstalled_apps_only(self):
-        tmp = Path(self.tmp.name)
-        (tmp / "kept.desktop").write_text("")
-        (tmp / "kept.AppImage").write_text("")
-        entry = lambda launch: {"name": launch, "launch": [launch], "disabled": [],
-                                "shortcuts": [{"mods": ["SUPER"], "key": "K"}]}
-        state = {"apps": {k: entry(str(tmp / k)) for k in
-                          ("kept.desktop", "gone.desktop", "kept.AppImage", "gone.AppImage")}}
-        state["apps"]["unmounted"] = entry("/media/nothing-here/x.AppImage")
-        removed = shortcuts.prune_missing(state)
-        self.assertEqual(sorted(Path(e["name"]).name for e in removed), ["gone.AppImage", "gone.desktop"])
-        self.assertEqual(sorted(state["apps"]), ["kept.AppImage", "kept.desktop", "unmounted"])
-
-    def test_dead_user_binds_are_deleted_with_a_backup(self):
-        tmp = Path(self.tmp.name)
-        apps = tmp / "share/applications"
-        apps.mkdir(parents=True)
-        (apps / "kept.desktop").write_text("")
-        bindings = tmp / "bindings.lua"
-        bindings.write_text(
-            'hl.unbind("SUPER + SHIFT + B")\n'
-            'o.bind("SUPER + SHIFT + B", "Brave", { launch = "brave-gone-for-test" })\n'
-            'o.bind("SUPER + SHIFT + K", "Kept", { launch = "gtk-launch kept" })\n'
-            'o.bind("SUPER + SHIFT + G", "Gone", { launch = "uwsm-app -- gtk-launch gone" })\n'
-            'o.bind("SUPER + SHIFT + S", "Shell", { launch = "sh -c true" })\n'
-            '-- o.bind("SUPER + SHIFT + C", "Commented", { launch = "nothing-here" })\n'
-            'o.bind("SUPER + SHIFT + H", "Plain", "missing-but-not-a-launch")\n')
-        env = {"XDG_DATA_HOME": str(tmp / "share"), "XDG_DATA_DIRS": str(tmp / "none")}
-        kept_file = tmp / "kept.json"
-        with unittest.mock.patch.dict(os.environ, env), \
-                unittest.mock.patch.object(shortcuts, "KEPT_FILE", kept_file), \
-                unittest.mock.patch.object(shortcuts, "_config_errors", return_value=""):
-            pending = shortcuts.pending_dead_binds([bindings])
-            self.assertEqual([b["description"] for _p, _n, b in pending], ["Brave", "Gone"])
-            # Nothing is deleted without a yes for that exact line.
-            self.assertEqual(shortcuts.remove_dead_user_binds([], [bindings]), [])
-            self.assertIn("Brave", bindings.read_text())
-            # Kept lines are not offered again.
-            shortcuts.keep_binds([pending[1][2]["key"]])
-            self.assertEqual([b["description"] for _p, _n, b in shortcuts.pending_dead_binds([bindings])], ["Brave"])
-            removed = shortcuts.remove_dead_user_binds([b["key"] for _p, _n, b in pending], [bindings])
-        self.assertEqual([b["description"] for b in removed], ["Brave", "Gone"])
-        text = bindings.read_text()
-        self.assertNotIn("Brave", text)
-        self.assertNotIn('"Gone"', text)
-        for kept in ('hl.unbind("SUPER + SHIFT + B")', "Kept", "Shell", "Commented", "Plain"):
-            self.assertIn(kept, text)
-        self.assertIn("Brave", (tmp / "bindings.lua.before-simple-launcher-cleanup").read_text())
-
-    def test_dead_user_binds_restored_on_config_error(self):
-        bindings = Path(self.tmp.name) / "bindings.lua"
-        original = 'o.bind("SUPER + SHIFT + B", "Brave", { launch = "brave-gone-for-test" })\n'
-        bindings.write_text(original)
-        with unittest.mock.patch.object(shortcuts, "_config_errors", side_effect=["", "boom", ""]):
-            with self.assertRaises(RuntimeError):
-                key = shortcuts.bind_key(bindings, original.rstrip("\n"))
-                shortcuts.remove_dead_user_binds([key], [bindings])
-        self.assertEqual(bindings.read_text(), original)
-
-    def test_render_lua_quotes_names_and_paths(self):
-        state = {"apps": {"x": {"name": 'Evil "name"\nhl.exec_cmd("rm")',
-                                "launch": ["/tmp/a b $(x)/x.desktop"], "disabled": [],
-                                "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "E", "replaces": ""}]}}}
-        lua = shortcuts.render_lua(state)
-        self.assertIn('hl.unbind("SUPER + ALT + E")', lua)
-        self.assertIn('"Evil \\"name\\"\\nhl.exec_cmd(\\"rm\\")"', lua)
-        self.assertIn("'/tmp/a b $(x)/x.desktop'", lua)
-        self.assertNotIn('\nhl.exec_cmd("rm")', lua)
-
-    def test_render_lua_comments_cannot_be_broken(self):
-        payload = 'x\rhl.exec_cmd("a")\nb\r\nc\x0bd\x7f'
-        state = {"apps": {"x": {"name": payload, "launch": ["/a.desktop"],
-                                "disabled": [{"mods": ["SUPER"], "key": "F", "description": payload}],
-                                "shortcuts": [{"mods": ["SUPER", "ALT"], "key": "E", "replaces": payload}]}}}
-        lua = shortcuts.render_lua(state)
-        for line in lua.splitlines():
-            if line.startswith("--"):
-                self.assertNotRegex(line, r"[\x00-\x1f\x7f]")
-        # Lua ends a comment at CR or LF; no raw CR may survive anywhere in the file.
-        self.assertNotIn("\r", lua)
-        self.assertIn('-- x hl.exec_cmd("a") b  c d : disabled (was: x hl.exec_cmd("a") b  c d )', lua)
-
-    def test_default_mods_round_trip(self):
-        original = shortcuts.SETTINGS_FILE
-        shortcuts.SETTINGS_FILE = Path(self.tmp.name) / "settings.json"
-        try:
-            self.assertEqual(shortcuts.load_default_mods(), ["SUPER", "SHIFT"])
-            shortcuts.save_default_mods(["CTRL", "SUPER"])
-            self.assertEqual(shortcuts.load_default_mods(), ["SUPER", "CTRL"])
-            shortcuts.SETTINGS_FILE.write_text('{"shortcut_default_mods": ["HYPER"]}')
-            self.assertEqual(shortcuts.load_default_mods(), ["SUPER", "SHIFT"])
-        finally:
-            shortcuts.SETTINGS_FILE = original
-
-    def test_load_state_drops_invalid_entries(self):
-        path = Path(self.tmp.name) / "state.json"
-        path.write_text('{"apps": {"a": {"name": "A", "launch": ["/a"], "shortcuts": '
-                        '[{"mods": ["SUPER"], "key": "bad key"}, {"mods": ["SUPER"], "key": "k"}]},'
-                        ' "b": {"name": "B", "launch": "not-a-list", "shortcuts": [{"mods": [], "key": "X"}]}}}')
-        original = shortcuts.STATE_FILE
-        shortcuts.STATE_FILE = path
-        try:
-            state = shortcuts.load_state()
-        finally:
-            shortcuts.STATE_FILE = original
-        self.assertEqual(list(state["apps"]), ["a"])
-        self.assertEqual(state["apps"]["a"]["shortcuts"][0]["key"], "K")
+            script = textwrap.dedent(f"""
+                import sys; sys.path.insert(0, {str(ROOT)!r})
+                from pathlib import Path
+                import shortcuts
+                g = shortcuts.GSettings()
+                assert g.available()
+                combo = {{**shortcuts.make_combo(["SUPER"], "1"), "action": "", "replaces": "x",
+                          "taken_from": "org.gnome.shell.keybindings:switch-to-application-1"}}
+                st = {{"apps": {{"a": {{"name": "A", "launch": ["/a.desktop"], "shortcuts": [combo], "disabled": []}}}},
+                      "applied": []}}
+                shortcuts.save_and_apply(st, g, Path({tmp!r}) / "s.json")
+                assert g.get_strv("org.gnome.shell.keybindings", "switch-to-application-1") == [], "taken"
+                own = [p for p in g.custom_paths() if "gnome-launcher-" in p]
+                assert g.read_custom(own[0])["binding"] == "<Super>1"
+                assert any(b["accel"] == "<Super>a" for b in shortcuts.read_desktop_binds(g))
+                shortcuts.save_and_apply({{"apps": {{}}, "applied": []}}, g, Path({tmp!r}) / "s.json")
+                assert g.get_strv("org.gnome.shell.keybindings", "switch-to-application-1") == ["<Super>1"]
+                assert not [p for p in g.custom_paths() if "gnome-launcher-" in p]
+                print("ok")
+            """)
+            env = {**os.environ, "GSETTINGS_BACKEND": "memory"}
+            result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=30)
+            self.assertEqual(result.stdout.strip(), "ok", result.stderr)
 
 
 if __name__ == "__main__":

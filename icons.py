@@ -1,12 +1,12 @@
 """Icons chosen by hand for entries without a good one (CLI agents, …).
 
-icons.json maps a desktop id to a theme icon name, or to a file App Manager
+icons.json maps a desktop id to a theme icon name, or to a file the launcher
 saved in ICON_DIR. Online candidates come from three open icon collections on
 cdn.jsdelivr.net (Dashboard Icons, selfh.st icons, Simple Icons). Their name
 lists (with aliases) are downloaded at most once a week into INDEX_DIR and
 searched by name, alias and word; the icons themselves are fetched with curl
 (https only, no redirects, one deadline, a size cap) through the bounded
-reader, and the popup decodes them only through the same checks as every
+reader, and the window decodes them only through the same checks as every
 other icon file (launcher_core.icon_bytes). No GTK here: the downloads run
 on threads."""
 import hashlib
@@ -19,14 +19,14 @@ from pathlib import Path
 
 from launcher_core import read_bounded_output
 
-OVERRIDES_FILE = Path.home() / ".config/applauncher/icons.json"
-ICON_DIR = Path.home() / ".local/share/applauncher/icons"
+OVERRIDES_FILE = Path.home() / ".config/gnome-launcher/icons.json"
+ICON_DIR = Path.home() / ".local/share/gnome-launcher/icons"
 MAX_FILE_BYTES = 256 * 1024
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 MAX_OVERRIDES = 2000
 TIMEOUT = 8
 HOST = "cdn.jsdelivr.net"
-INDEX_DIR = Path.home() / ".cache/applauncher/icon-index"
+INDEX_DIR = Path.home() / ".cache/gnome-launcher/icon-index"
 MAX_INDEX_BYTES = 4 * 1024 * 1024
 INDEX_TIMEOUT = 20
 INDEX_MAX_AGE = 7 * 24 * 3600

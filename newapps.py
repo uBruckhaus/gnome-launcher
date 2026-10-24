@@ -1,15 +1,15 @@
-"""Newly installed apps and plugins, marked with a star in the popup.
+"""Newly installed apps, marked with a star in the launcher.
 
-seen.json remembers when each entry (desktop id, or plugin:<id>) was first
+seen.json remembers when each entry (desktop id) was first
 seen. The first look at a page records everything already there as old, so
 only later installs count as new. An entry stays new for NEW_DAYS, or until
-it is opened from the popup."""
+it is opened from the launcher."""
 import json
 import os
 import time
 from pathlib import Path
 
-SEEN_FILE = Path.home() / ".config/applauncher/seen.json"
+SEEN_FILE = Path.home() / ".config/gnome-launcher/seen.json"
 NEW_DAYS = 7
 MAX_ENTRIES = 5000
 MAX_FILE_BYTES = 512 * 1024
@@ -62,7 +62,7 @@ def save(data, path=None):
 def note(data, ids, kind, now=None, installed=None):
     """Record entries seen on page kind; True when something changed.
     installed: {id: when it was installed}, where known (an entry that shows
-    up late, like a CLI agent App Manager learned to list, is new only if it
+    up late, like a CLI agent the launcher learned to list, is new only if it
     was installed recently)."""
     now = int(now if now is not None else time.time())
     installed = installed or {}
@@ -92,7 +92,7 @@ def is_new(data, key, now=None):
 
 
 def opened(data, key):
-    """Opened from the popup: not new any more. True when it was."""
+    """Opened from the launcher: not new any more. True when it was."""
     if data["seen"].get(key):
         data["seen"][key] = 0
         return True

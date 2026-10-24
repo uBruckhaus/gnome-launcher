@@ -4,25 +4,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-import i18n  # noqa: E402
 import groups  # noqa: E402
 
 
 class GroupPageTests(unittest.TestCase):
     def setUp(self):
-        i18n._lang = "en"
-        source = ROOT / "launcher_popup.py"
+        source = ROOT / "launcher.py"
         tree = ast.parse(source.read_text())
         cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Launcher")
         names = {"save_group_name", "save_groups", "put_in_group", "toggle_group", "move_group"}
         cls.bases = []
         cls.body = [n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name in names]
-        namespace = {"groups": groups, "_": i18n._, "set_view": Mock()}
+        namespace = {"groups": groups, "_": lambda text: text, "set_view": Mock()}
         exec(compile(ast.Module(body=[cls], type_ignores=[]), str(source), "exec"), namespace)
         self.set_view = namespace["set_view"]
         self.app = namespace["Launcher"]()
@@ -40,7 +37,6 @@ class GroupPageTests(unittest.TestCase):
             setattr(self.app, name, Mock())
 
     def tearDown(self):
-        i18n._lang = None
         self.tmp.cleanup()
 
     def test_new_group_for_an_app_is_saved_and_shown(self):
