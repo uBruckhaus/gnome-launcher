@@ -42,7 +42,7 @@ import dock_core
 import icons
 from i18n import _
 import corners
-from launcher_core import icon_bytes, launch_action, launch_app, parse_desktop_files, read_bounded_output, saved_corners
+from launcher_core import icon_bytes, icon_file_for, launch_action, launch_app, parse_desktop_files, read_bounded_output, saved_corners
 from palette import ThemePalette
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -106,6 +106,13 @@ def icon_image(app, size):
             image.set_pixel_size(size)
             return image
         name = path.stem
+    display = Gdk.Display.get_default()
+    if display is not None and not Gtk.IconTheme.get_for_display(display).has_icon(name):
+        found = icon_file_for(name)  # Missing from a stale icon-theme.cache.
+        if found is not None and str(found) != app.get("icon"):  # Once: no loop on a bad file.
+            return icon_image({"icon": str(found)}, size)
+        if found is None:
+            name = "application-x-executable"  # Not the theme's red "missing" sign.
     image = Gtk.Image.new_from_icon_name(name)
     image.set_pixel_size(size)
     return image

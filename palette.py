@@ -1,7 +1,6 @@
-"""App Manager - Theme colors from Omarchy."""
+"""App Manager - Theme colors: Omarchy's theme, or Adwaita's (desktop.py)."""
 
-from pathlib import Path
-import tomllib
+import desktop
 
 DEFAULT_COLORS = {
     "background": "#1e1e2e",
@@ -17,7 +16,8 @@ DEFAULT_COLORS = {
 
 
 class ThemePalette:
-    """Expose the current Omarchy theme colors to the launcher."""
+    """Expose the current theme colors to the launcher: the Omarchy theme's,
+    or libadwaita's (other desktops, or Settings › Look on Omarchy)."""
 
     def __init__(self):
         self.colors = DEFAULT_COLORS.copy()
@@ -25,13 +25,14 @@ class ThemePalette:
 
     def reload(self):
         try:
-            path = Path.home() / ".local/state/omarchy/current/theme/colors.toml"
-            theme = tomllib.loads(path.read_text())
-            colors = {key: theme.get(key, fallback) for key, fallback in DEFAULT_COLORS.items()}
-            if "muted" not in theme:
-                colors["muted"] = theme.get("dark_foreground") or theme.get("color8") or DEFAULT_COLORS["muted"]
+            if desktop.adwaita():
+                import desktop_generic
+                colors = desktop_generic.theme_colors()
+            else:
+                colors = desktop.theme_colors()
         except (OSError, ValueError):
             colors = DEFAULT_COLORS.copy()
+        colors = {key: colors.get(key, fallback) for key, fallback in DEFAULT_COLORS.items()}
         if colors == self.colors:
             return False
         self.colors = colors

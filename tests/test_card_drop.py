@@ -27,7 +27,7 @@ class CardDropTests(unittest.TestCase):
         self.app = launcher_methods("own_card_drag", "on_chip_drop", "on_tile_drag_begin", "on_tile_drag_end",
                                     "accepts_drop", "refresh_held_back", "refresh_list",
                                     "on_group_drag_begin", "on_group_drag_end", "clear_all_drop_marks",
-                                    "clear_drop_marks")()
+                                    "clear_drop_marks", "filtering")()
         self.app.put_in_group = Mock()
         self.app.save_groups = Mock()
         self.app.update_title = Mock(side_effect=AssertionError("refreshed during a drag"))
@@ -35,6 +35,7 @@ class CardDropTests(unittest.TestCase):
                                       {"id": "games", "name": "Games"}], "members": {}, "collapsed": []}
         self.app.filter_bar = Mock()
         self.app.search_query = ""
+        self.app.mark_filter = None
         self.app.mode = "apps"
         self.app.overview_filter = {"apps": "all", "plugins": "all"}
 

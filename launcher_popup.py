@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""AppLauncher as a Wayland layer-shell popup, rather than an app window."""
+"""App Manager: on Omarchy a Wayland layer-shell popup from the bar, on other
+desktops (desktop.py) an ordinary app window in GNOME's look."""
 
 import json
 import os
@@ -10,10 +11,15 @@ import sys
 import time
 from pathlib import Path
 
+import desktop
+
+# The bar popup (Omarchy) or an app window (other desktops).
+POPUP = desktop.popup()
+
 # GTK4 layer shell must load before GTK's Wayland client library. The Python
 # bindings load GTK first, so preload the layer-shell library on re-exec.
 layer_shell_library = "libgtk4-layer-shell.so.0"
-if layer_shell_library not in os.environ.get("LD_PRELOAD", "").split(":"):
+if POPUP and layer_shell_library not in os.environ.get("LD_PRELOAD", "").split(":"):
     os.environ["LD_PRELOAD"] = ":".join(filter(None, (
         layer_shell_library, os.environ.get("LD_PRELOAD", ""))))
     os.execv(sys.executable, [sys.executable, *sys.argv])
@@ -22,9 +28,17 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-gi.require_version("Gtk4LayerShell", "1.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Gtk4LayerShell
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk
+if POPUP:
+    gi.require_version("Gtk4LayerShell", "1.0")
+    from gi.repository import Gtk4LayerShell
+# GNOME's look: libadwaita's widgets and colours (other desktops always,
+# Omarchy when Settings › Look says so). Omarchy's own look stays plain GTK.
+ADWAITA = desktop.adwaita()
+if ADWAITA:
+    gi.require_version("Adw", "1")
+    from gi.repository import Adw
 
 # Once Gtk4LayerShell is loaded into this process by ld.so, remove it from
 # LD_PRELOAD so child processes and launched applications (like Steam / pressure-vessel)
@@ -46,11 +60,11 @@ from launcher_core import (
     process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, HIDDEN_PLUGINS_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
-    saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown, saved_corners, set_corners, read_bounded_output,
+    saved_wide_layout, set_wide_layout, saved_look, set_look, view_buttons_shown, set_view_buttons_shown, filter_field_shown, set_filter_field_shown, saved_corners, set_corners, read_bounded_output,
     saved_size, set_saved_size, saved_position, set_saved_position,
-    plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
+    plugin_manifests, set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin, launch_floating, floating_argv, load_hidden_apps, open_plugin, parse_desktop_files, parse_plugins,
     plugin_removal_note, save_hidden_apps, set_in_bar, BAR_SECTIONS, USER_PLUGINS_DIR,
-    icon_bytes,
+    icon_bytes, icon_file_for,
 )
 from palette import ThemePalette
 import i18n
@@ -163,6 +177,23 @@ ICON_DECODE_SIZE = 128         # the largest folder icons; four times the 32 px 
 _icon_cache = {}               # (path, mtime_ns, size) -> Gdk.Texture or None
 
 
+def app_image(icon_name):
+    """A Gtk.Image for a desktop file's Icon: its file, the theme's icon, or
+    the hicolor/pixmaps file the theme misses (a stale icon-theme.cache)."""
+    image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
+    path = Path(icon_name)
+    themed_name = path.stem if path.suffix.lower() in image_extensions else path.name
+    texture = icon_texture(icon_name) if path.is_file() else None
+    if texture is None:
+        display = Gdk.Display.get_default()
+        if display is not None and not Gtk.IconTheme.get_for_display(display).has_icon(themed_name):
+            found = icon_file_for(themed_name)
+            texture = icon_texture(found) if found is not None else None
+            if texture is None:
+                themed_name = "application-x-executable"  # Not the theme's red "missing" sign.
+    return Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+
+
 def icon_texture(path):
     """A small texture for an icon file, or None to use the themed icon.
 
@@ -259,9 +290,8 @@ atexit.register(cleanup_pid)
 
 
 def hyprland_rounding():
-    """The windows' rounding (theme or looknfeel.lua), or None if unknown."""
-    out = read_bounded_output(["hyprctl", "getoption", "decoration:rounding", "-j"], max_bytes=4096, timeout=2)
-    return corners.parse_rounding(out or "")
+    """The windows' rounding (theme or looknfeel.lua, or the desktop's), or None if unknown."""
+    return desktop.window_rounding()
 
 
 # A key pressed alone this soon after a combo makes a two-step shortcut.
@@ -327,22 +357,50 @@ KEY_STYLES = {
 }
 
 
-class Launcher(Gtk.Application):
+class NoMenuWatch:
+    """Outside Omarchy no other menu takes the keyboard from a window."""
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+
+class AppWindow(Adw.ApplicationWindow if ADWAITA else Gtk.ApplicationWindow):
+    """The app window (other desktops): tells when the window gets another size,
+    so the list turns into folders or cards as the popup does when resized."""
+
+    def __init__(self, on_size, **kwargs):
+        super().__init__(**kwargs)
+        self.on_size = on_size
+        self.last_size = (0, 0)
+
+    def do_size_allocate(self, width, height, baseline):
+        (Adw.ApplicationWindow if ADWAITA else Gtk.ApplicationWindow).do_size_allocate(self, width, height, baseline)
+        if (width, height) != self.last_size:
+            self.last_size = (width, height)
+            GLib.idle_add(self.on_size)
+
+
+class Launcher(Adw.Application if ADWAITA else Gtk.Application):
     def __init__(self):
-        super().__init__(application_id="org.omarchy.simplelauncherforfools")
+        super().__init__(application_id=desktop.app_id())
         self.window = None
         self.apps = []
         self.plugins = []
         # The list shown: "apps", or "plugins" (shell widgets, panels and
         # overlays). Each keeps its own hidden entries and show-hidden toggle.
-        self.mode = "plugins" if os.environ.pop("SIMPLE_LAUNCHER_MODE", "") == "plugins" else "apps"
+        self.mode = "plugins" if (os.environ.pop("SIMPLE_LAUNCHER_MODE", "") == "plugins"
+                                  and desktop.has_plugins()) else "apps"
         self.hidden_by_mode = {"apps": load_hidden_apps(HIDDEN_FILE),
                                "plugins": load_hidden_apps(HIDDEN_PLUGINS_FILE)}
         self.show_hidden_by_mode = {"apps": False, "plugins": False}
         self.running_first = running_first_enabled()
         self.admin_auth_pending = False
         # Omarchy's menus (Super + Space, …) open underneath this popup: close for them.
-        self.layer_watch = LayerWatch("simple-launcher-for-fools", self.on_menu_opened)
+        self.layer_watch = (LayerWatch("simple-launcher-for-fools", self.on_menu_opened)
+                            if desktop.watches_menus() else NoMenuWatch())
         try:
             forget_saved_admin_action()
         except OSError:
@@ -353,6 +411,7 @@ class Launcher(Gtk.Application):
         # The list | groups | origin buttons in the small popup's header are
         # a setting, off by default; then the popup shows the plain list.
         self.view_buttons_on = view_buttons_shown()
+        self.filter_field_on = filter_field_shown()
         # The overview (popup resized to two or more columns): the same
         # entries as cards, one group (or all) at a time, picked in the
         # filter bar at the bottom. The filter is per page, like the groups.
@@ -373,6 +432,7 @@ class Launcher(Gtk.Application):
         self.process_names = set()
         self.theme = ThemePalette()
         self.search_query = ""
+        self.mark_filter = None  # A legend entry: only entries with that mark.
         self.shortcut_state = shortcuts.load_state()
         self.list_bindings = None  # Snapshot for the list chips, refreshed on open.
         self.shortcut_app = None
@@ -427,11 +487,23 @@ class Launcher(Gtk.Application):
 
     def do_shutdown(self):
         cleanup_pid()
-        super().do_shutdown()
+        # The base class's vfunc, named: super() resolves to Gio.Application's
+        # unbound method under libadwaita and fails without self.
+        (Adw.Application if ADWAITA else Gtk.Application).do_shutdown(self)
 
     def do_activate(self):
         if self.window is None:
             self.build_window()
+            if not POPUP:
+                # An app window: closing it quits, a second start shows it again.
+                for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                    signal.signal(sig, lambda *_: sys.exit(0))
+                GLib.timeout_add(100, lambda: True)
+                GLib.timeout_add_seconds(1, self.poll)
+                self.start_watchdog()
+                self.watch_app_dirs()
+                self.open()
+                return
             self.hold()  # Keep the singleton alive while its popup is hidden.
             signal.signal(signal.SIGUSR1, lambda *_: GLib.idle_add(self.toggle))
             # launcher-toggle apps / plugins: open (or close) that list.
@@ -451,18 +523,27 @@ class Launcher(Gtk.Application):
         if settings is not None:
             # No middle-click paste anywhere in the popup (see guard_text_field).
             settings.set_property("gtk-enable-primary-paste", False)
-        window = Gtk.ApplicationWindow(application=self)
-        window.set_decorated(False)
+        if POPUP:
+            window = Gtk.ApplicationWindow(application=self)
+            window.set_decorated(False)
+            Gtk4LayerShell.init_for_window(window)
+            Gtk4LayerShell.set_namespace(window, "simple-launcher-for-fools")
+            Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
+            Gtk4LayerShell.set_keyboard_mode(window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
+            for edge in (Gtk4LayerShell.Edge.TOP, Gtk4LayerShell.Edge.BOTTOM,
+                         Gtk4LayerShell.Edge.LEFT, Gtk4LayerShell.Edge.RIGHT):
+                Gtk4LayerShell.set_anchor(window, edge, True)
+            Gtk4LayerShell.set_exclusive_zone(window, 0)
+        else:
+            window = AppWindow(self.on_window_size, application=self)
+            width, height = saved_size("window") or self.default_window_size()
+            window.set_default_size(width, height)
+            if saved_size("window_maximized"):
+                window.maximize()
+            window.connect("close-request", self.on_close_request)
         window.set_title("App Manager")
         window.set_name("launcher-window")
-        Gtk4LayerShell.init_for_window(window)
-        Gtk4LayerShell.set_namespace(window, "simple-launcher-for-fools")
-        Gtk4LayerShell.set_layer(window, Gtk4LayerShell.Layer.OVERLAY)
-        Gtk4LayerShell.set_keyboard_mode(window, Gtk4LayerShell.KeyboardMode.ON_DEMAND)
-        for edge in (Gtk4LayerShell.Edge.TOP, Gtk4LayerShell.Edge.BOTTOM,
-                     Gtk4LayerShell.Edge.LEFT, Gtk4LayerShell.Edge.RIGHT):
-            Gtk4LayerShell.set_anchor(window, edge, True)
-        Gtk4LayerShell.set_exclusive_zone(window, 0)
+        window.set_icon_name(desktop.app_id())
 
         overlay = Gtk.Overlay()
         overlay.add_css_class("launcher-overlay")
@@ -470,19 +551,21 @@ class Launcher(Gtk.Application):
         overlay.set_vexpand(True)
         overlay.set_halign(Gtk.Align.FILL)
         overlay.set_valign(Gtk.Align.FILL)
-        window.set_child(overlay)
+        if POPUP:
+            window.set_child(overlay)
         overlay.set_child(Gtk.Box())
-        click = Gtk.GestureClick()
-        click.connect("released", self.on_overlay_click)  # Close on release so the bar never sees a half-finished click.
-        overlay.add_controller(click)
-        # Resizing: the grip in the card's corner. The drag is tracked on the
-        # full-screen overlay, which stays put while the card grows around
-        # its centre (the grip moves with the card).
-        sizer = Gtk.GestureDrag()
-        sizer.connect("drag-begin", self.on_resize_begin)
-        sizer.connect("drag-update", self.on_resize_update)
-        sizer.connect("drag-end", self.on_resize_end)
-        overlay.add_controller(sizer)
+        if POPUP:
+            click = Gtk.GestureClick()
+            click.connect("released", self.on_overlay_click)  # Close on release so the bar never sees a half-finished click.
+            overlay.add_controller(click)
+            # Resizing: the grip in the card's corner. The drag is tracked on the
+            # full-screen overlay, which stays put while the card grows around
+            # its centre (the grip moves with the card).
+            sizer = Gtk.GestureDrag()
+            sizer.connect("drag-begin", self.on_resize_begin)
+            sizer.connect("drag-update", self.on_resize_update)
+            sizer.connect("drag-end", self.on_resize_end)
+            overlay.add_controller(sizer)
 
         card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         card.add_css_class("launcher-card")
@@ -493,6 +576,14 @@ class Launcher(Gtk.Application):
         frame.set_valign(Gtk.Align.CENTER)
         frame.set_margin_top(24)
         frame.set_margin_bottom(24)
+        if not POPUP:
+            # The card is the window's content; the window manager sizes and moves it.
+            card.add_css_class("launcher-windowed")
+            card.set_vexpand(True)
+            frame.set_halign(Gtk.Align.FILL)
+            frame.set_valign(Gtk.Align.FILL)
+            frame.set_margin_top(0)
+            frame.set_margin_bottom(0)
         grip = Gtk.Image.new_from_icon_name("pan-down-symbolic")
         grip.add_css_class("launcher-grip")
         grip.set_pixel_size(14)
@@ -500,8 +591,12 @@ class Launcher(Gtk.Application):
         grip.set_valign(Gtk.Align.END)
         grip.set_cursor_from_name("se-resize")
         grip.set_tooltip_text(_("Drag to resize · double-click for the default size"))
+        grip.set_visible(POPUP)
         frame.add_overlay(grip)
-        overlay.add_overlay(frame)
+        if POPUP:
+            overlay.add_overlay(frame)
+        else:
+            overlay.set_child(frame)  # Its size is the window's: the window manager sizes both.
         self.card_frame, self.grip = frame, grip
 
         header = Gtk.Box(spacing=8)
@@ -549,6 +644,15 @@ class Launcher(Gtk.Application):
         mouse_hint.set_margin_start(6)
         mouse_hint.set_margin_end(6)
         self.mouse_hint = mouse_hint
+        # What the dots, stars and badges on the icons mean, in a popover
+        # drawn with the same marks.
+        legend_button = Gtk.MenuButton(icon_name="help-about-symbolic")
+        legend_button.add_css_class("flat")
+        legend_button.add_css_class("launcher-header-btn")
+        legend_button.set_tooltip_text(_("What the marks mean"))
+        legend_button.set_create_popup_func(lambda button: button.set_popover(self.legend_popover()))
+        header.append(legend_button)
+        self.legend_button = legend_button
         # App list only: running apps in a group of their own on top. A dot,
         # like the run dot on the icons (the play icon is the Open action).
         running_button = Gtk.Button(icon_name="media-record-symbolic")
@@ -584,11 +688,15 @@ class Launcher(Gtk.Application):
         hidden_button.add_css_class("launcher-header-btn")
         hidden_button.connect("clicked", self.toggle_hidden)
         header.append(hidden_button)
-        # The same Nerd Font gear (U+F0493) in a small bordered box as the other plugins.
+        # The same Nerd Font gear (U+F0493) in a small bordered box as the other
+        # plugins; GNOME's look: its symbolic icon (no Nerd Font needed).
         settings_button = Gtk.Button()
-        gear = Gtk.Label(label="\U000F0493")
-        gear.add_css_class("launcher-gear")
-        settings_button.set_child(gear)
+        if ADWAITA:
+            settings_button.set_icon_name("emblem-system-symbolic")
+        else:
+            gear = Gtk.Label(label="\U000F0493")
+            gear.add_css_class("launcher-gear")
+            settings_button.set_child(gear)
         settings_button.set_tooltip_text(_("Settings"))
         settings_button.add_css_class("flat")
         settings_button.add_css_class("launcher-header-btn")
@@ -600,13 +708,39 @@ class Launcher(Gtk.Application):
         header_bar.append(title_side)
         header_bar.append(mouse_hint)
         header_bar.append(header)
-        header_bar.add_controller(header_clicks)
-        # Drag the header to move the card (Super + drag belongs to Hyprland,
-        # and a layer surface is not a window it moves). The drag itself is
-        # tracked on the overlay, see on_resize_begin.
-        header_bar.set_cursor_from_name("grab")
-        title.set_tooltip_text(_("Drag to move"))
-        card.append(header_bar)
+        if POPUP:
+            header_bar.add_controller(header_clicks)
+            # Drag the header to move the card (Super + drag belongs to Hyprland,
+            # and a layer surface is not a window it moves). The drag itself is
+            # tracked on the overlay, see on_resize_begin.
+            header_bar.set_cursor_from_name("grab")
+            title.set_tooltip_text(_("Drag to move"))
+            card.append(header_bar)
+        else:
+            # The header row is the header bar's content, beside the window buttons.
+            mouse_hint.set_visible(False)
+            header_bar.set_hexpand(True)
+            header_bar.add_css_class("launcher-headerbar-content")
+            bar = Adw.HeaderBar() if ADWAITA else Gtk.HeaderBar()
+            bar.add_css_class("launcher-headerbar")
+            # The window buttons go into the row itself: with buttons beside
+            # it, the title widget is centred between them and the window
+            # edge, which moves the title right of the filter field below.
+            bar.set_show_start_title_buttons(False)
+            bar.set_show_end_title_buttons(False)
+            header_bar.append(Gtk.WindowControls(side=Gtk.PackType.END))
+            # The header bar pads 6 px; the card below pads 17 px (CSS
+            # .launcher-windowed): the title starts where the filter field does.
+            header_bar.set_margin_start(11)
+            header_bar.set_margin_end(11)
+            bar.set_title_widget(header_bar)
+            if ADWAITA:
+                toolbar = Adw.ToolbarView()
+                toolbar.add_top_bar(bar)
+                toolbar.set_content(overlay)
+                window.set_content(toolbar)
+            else:
+                window.set_titlebar(bar)
         self.header_bar = header_bar
 
         # Asks before deleting hand-written shortcuts of removed apps.
@@ -681,7 +815,6 @@ class Launcher(Gtk.Application):
         filter_entry.set_placeholder_text(_("Type to filter"))
         filter_entry.set_max_width_chars(1)
         filter_entry.set_hexpand(True)
-        filter_entry.set_visible(False)
         filter_entry.get_delegate().set_max_length(200)
         filter_entry.connect("search-changed", self.on_filter_entry_changed)
         filter_entry.connect("activate", lambda *_a: self.selected_item() is not None
@@ -690,6 +823,19 @@ class Launcher(Gtk.Application):
         filter_entry.connect("stop-search", lambda *_a: self.on_escape())
         self.guard_text_field(filter_entry)
         self.filter_entry = filter_entry
+        # × hides the field for good (Settings › Filter field brings it back).
+        hide_filter = Gtk.Button(icon_name="window-close-symbolic")
+        hide_filter.add_css_class("flat")
+        hide_filter.add_css_class("launcher-header-button")
+        hide_filter.set_valign(Gtk.Align.CENTER)
+        hide_filter.set_focus_on_click(False)
+        hide_filter.set_tooltip_text(_("Hide the filter field. Typing still filters; Settings can show it again."))
+        hide_filter.connect("clicked", lambda *_a: self.set_filter_field(False))
+        filter_row = Gtk.Box(spacing=6)
+        filter_row.append(filter_entry)
+        filter_row.append(hide_filter)
+        filter_row.set_visible(False)
+        self.filter_row = filter_row
         empty = Gtk.Label(label=_("Nothing to show here"))
         empty.add_css_class("sc-empty")
         empty.set_margin_top(40)
@@ -697,13 +843,14 @@ class Launcher(Gtk.Application):
         grid_box.append(empty)
         grid_scroller.set_child(grid_box)
         stack.add_named(grid_scroller, "overview")
-        card.insert_child_after(filter_entry, self.header_bar)
+        card.insert_child_after(filter_row, self.header_bar if POPUP else None)
         stack.connect("notify::visible-child-name", lambda *_a: self.sync_filter_entry())
 
         # Under the overview: apps | plugins, then one button per group.
         filter_bar = Gtk.Box(spacing=8)
         filter_bar.add_css_class("launcher-filter-bar")
         mode_switch = Gtk.Box()
+        mode_switch.set_visible(desktop.has_plugins())  # Apps only elsewhere.
         mode_switch.add_css_class("linked")
         mode_switch.add_css_class("launcher-view-switch")
         self.mode_switch_buttons = {}
@@ -810,7 +957,10 @@ class Launcher(Gtk.Application):
         self.build_details_page()
         self.build_icon_page()
         self.apply_theme()
-        self.resize_to(*self.saved_card_size())
+        if POPUP:
+            self.resize_to(*self.saved_card_size())
+        else:
+            self.resize_to(*(saved_size("window") or self.default_window_size()))
         self.move_to(self.position)
 
     # --- size and overview --------------------------------------------------------
@@ -835,6 +985,35 @@ class Launcher(Gtk.Application):
     def default_card_size():
         return CARD_WIDTH, LIST_HEIGHT
 
+    @staticmethod
+    def default_window_size():
+        """The app window at first start: wide enough for folders."""
+        return 860, 720
+
+    def on_window_size(self):
+        """The app window got another size: the card fills it, so the list
+        turns into folders or cards as the popup does when it is resized."""
+        if self.window is None:
+            return GLib.SOURCE_REMOVE
+        width = self.window.get_width()
+        height = self.stack.get_height() if hasattr(self, "stack") else 0
+        if width > 0:
+            self.resize_to(width, height if height > 0 else LIST_HEIGHT)
+        return GLib.SOURCE_REMOVE
+
+    def on_close_request(self, window):
+        """The app window closes: remember its size (not while maximized)."""
+        try:
+            maximized = window.is_maximized()
+            set_saved_size("window_maximized", (1, 1) if maximized else None)
+            if not maximized:
+                width, height = window.get_default_size()
+                if width > 0 and height > 0:
+                    set_saved_size("window", (width, height))
+        except OSError:
+            pass
+        return False
+
     def saved_card_size(self):
         return saved_size("size") or self.default_card_size()
 
@@ -843,6 +1022,8 @@ class Launcher(Gtk.Application):
         """{"left"|"right"|"bottom": pixels} the card keeps free for an
         auto-hiding dock, which this popup keeps shown while open. A dock
         without auto-hide reserves its space itself (exclusive zone)."""
+        if not (POPUP and desktop.has_dock()):
+            return {}
         try:
             dock = dock_core.settings()
         except Exception:
@@ -879,6 +1060,9 @@ class Launcher(Gtk.Application):
         """Card width and page height, within the screen. The overview shows
         as many card columns as fit; sub-pages keep the same height so
         switching pages never makes the card jump."""
+        if not POPUP:
+            self.fit_window(width, height)
+            return
         screen_w, screen_h = self.screen_size()
         self.card_w = max(CARD_WIDTH, min(int(width), screen_w - 48, MAX_CARD_WIDTH))
         columns = grid_columns(self.card_w)
@@ -920,6 +1104,36 @@ class Launcher(Gtk.Application):
                 set_saved_size("size", None if default else (self.card_w, self.list_h))
             except OSError as error:
                 self.notify(_("Could not save the setting"), str(error))
+
+    def fit_window(self, width, height):
+        """resize_to for the app window: the window's width and the page's
+        height decide the layout; the pages only keep a small minimum, so
+        the window can shrink again."""
+        self.card_w = max(CARD_WIDTH, int(width))
+        self.list_h = max(MIN_LIST_HEIGHT, int(height))
+        self.max_card_size = (self.card_w, self.list_h)
+        self.card.set_size_request(CARD_WIDTH, -1)
+        for scroller in (self.scroller, self.grid_scroller):
+            scroller.set_max_content_height(-1)
+            scroller.set_min_content_height(MIN_LIST_HEIGHT)
+            scroller.set_vexpand(True)
+        for page in self.height_pages:
+            if isinstance(page, Gtk.ScrolledWindow):
+                page.set_max_content_height(-1)
+                page.set_min_content_height(MIN_LIST_HEIGHT)
+            else:
+                page.set_size_request(-1, MIN_LIST_HEIGHT)
+            page.set_vexpand(True)
+        if self.shortcut_app is not None:
+            self.sc_page.set_size_request(-1, MIN_LIST_HEIGHT)
+        self.apply_grid_columns()
+        self.refit_folders()
+        if hasattr(self, "new_group_label"):
+            self.new_group_label.set_visible(self.card_w >= 700)
+        overview = grid_columns(self.card_w) > 1
+        if overview != self.overview:
+            self.set_overview(overview)
+        self.sync_previews()
 
     def on_header_click(self, gesture, count, _x, _y):
         if count != 2:
@@ -1031,7 +1245,7 @@ class Launcher(Gtk.Application):
 
     def keep_on_screen(self):
         """Once laid out at its new size: a moved card stays fully on screen."""
-        if self.position is not None:
+        if POPUP and self.position is not None:
             before = self.position
             self.move_to(self.position)
             if self.position != before:
@@ -1049,6 +1263,8 @@ class Launcher(Gtk.Application):
 
     def move_to(self, position, save=False):
         """Put the card's top-left at position (kept on screen), or centre it for None."""
+        if not POPUP:
+            return  # The window manager places the app window.
         frame = self.card_frame
         space = self.dock_space()
         left = space.get("left", 0)
@@ -1138,14 +1354,14 @@ class Launcher(Gtk.Application):
             # Every group stays, empty or not, also while searching: each is
             # a place to drag a card to. Other only when something is in it
             # or a card could go back there.
-            if members or gid != groups.OTHER or self.search_query.strip():
+            if members or gid != groups.OTHER or self.filtering():
                 result.append((gid, groups.display_name(gid, self.groups, self.mode), members))
         return result
 
     def refresh_overview(self, entries, selected_id):
         sections = self.overview_sections(entries)
         wanted = self.overview_filter[self.mode]
-        if self.search_query.strip():
+        if self.filtering():
             # A search looks through everything unless a chip is clicked
             # during it; the chosen group comes back after it. The chips
             # mark where the selected card belongs.
@@ -1189,16 +1405,22 @@ class Launcher(Gtk.Application):
         entry = getattr(self, "filter_entry", None)
         if entry is None or not hasattr(self, "stack"):
             return
-        entry.set_visible(self.overview and self.wide_layout == "folders" and self.main_page_open())
+        self.filter_row.set_visible(self.filter_field_on and self.overview
+                                    and self.wide_layout == "folders" and self.main_page_open())
         if entry.get_text() != self.search_query:
             self.filter_syncing = True
             entry.set_text(self.search_query)
             entry.set_position(-1)
             self.filter_syncing = False
 
+    def filtering(self):
+        """Typing to filter, or a legend entry chosen: the results as cards."""
+        return bool(self.search_query.strip() or self.mark_filter)
+
     def on_escape(self):
-        if self.search_query:
+        if self.search_query or self.mark_filter:
             self.search_query = ""
+            self.mark_filter = None
             self.refresh_list()
         elif self.open_folder():
             self.leave_folder()
@@ -1207,18 +1429,18 @@ class Launcher(Gtk.Application):
 
     def filter_has_focus(self):
         entry = getattr(self, "filter_entry", None)
-        return entry is not None and entry.get_visible() and entry.get_delegate().has_focus()
+        return entry is not None and self.filter_row.get_visible() and entry.get_delegate().has_focus()
 
     def showing_folders(self, wanted=None):
         """The folder layout's start page: "All", not typing to filter."""
         if wanted is None:
             wanted = self.overview_filter[self.mode]
         return (self.overview and self.wide_layout == "folders" and wanted == "all"
-                and not self.search_query.strip())
+                and not self.filtering())
 
     def open_folder(self):
         """In a folder of the folder layout (Esc / Backspace go back)."""
-        return (self.overview and self.wide_layout == "folders" and not self.search_query.strip()
+        return (self.overview and self.wide_layout == "folders" and not self.filtering()
                 and self.overview_filter[self.mode] != "all")
 
     def fill_folders(self, sections, selected_id):
@@ -1266,7 +1488,9 @@ class Launcher(Gtk.Application):
 
     def corners_tip(self):
         """Where the windows' rounding comes from: the theme, looknfeel.lua or Omarchy."""
-        source = corners.rounding_source()
+        source = desktop.rounding_source()
+        if source == "desktop":
+            return _("Corners of the window, its folders and cards. “Like windows” follows the desktop's rounded corners.")
         if source == "user":
             origin = _("Your windows' rounding is set in ~/.config/hypr/looknfeel.lua.")
         elif source == "theme":
@@ -1463,11 +1687,7 @@ class Launcher(Gtk.Application):
 
     @staticmethod
     def app_icon(app, size):
-        icon_name = app.get("icon") or "application-x-executable"
-        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
-        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
-        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
-        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+        icon = app_image(app.get("icon") or "application-x-executable")
         icon.set_pixel_size(size)
         return icon
 
@@ -1545,7 +1765,7 @@ class Launcher(Gtk.Application):
             elif button.has_css_class("launcher-filter-current"):
                 button.remove_css_class("launcher-filter-current")
                 button.set_tooltip_text(_("Show only this group (Ctrl+G: next group). Right click: rename, move or delete."))
-        if gid in getattr(self, "filter_buttons", {}) and self.search_query.strip():
+        if gid in getattr(self, "filter_buttons", {}) and self.filtering():
             self.filter_on_button = self.filter_buttons[gid]
             GLib.idle_add(self.reveal_filter_chip)
 
@@ -1579,7 +1799,7 @@ class Launcher(Gtk.Application):
         return True
 
     def set_overview_filter(self, gid):
-        if self.search_query.strip():
+        if self.filtering():
             self.search_filter = gid  # For this search only.
             self.refresh_list(selected_id=self.row_key(self.selected_item()))
             return
@@ -1591,7 +1811,7 @@ class Launcher(Gtk.Application):
 
     def next_overview_filter(self, step=1):
         ids = getattr(self, "filter_ids", None) or ["all"]
-        current = ((getattr(self, "search_filter", None) or "all") if self.search_query.strip()
+        current = ((getattr(self, "search_filter", None) or "all") if self.filtering()
                    else self.overview_filter[self.mode])
         position = ids.index(current) if current in ids else 0
         self.set_overview_filter(ids[(position + step) % len(ids)])
@@ -1901,7 +2121,7 @@ class Launcher(Gtk.Application):
             # After the drop has finished: the name page takes the keyboard.
             GLib.idle_add(lambda: self.open_group_name_page(None, app) and False)
         else:
-            if self.search_query.strip():
+            if self.filtering():
                 # Dropped while typing to filter: once the filter is cleared,
                 # show the group it went to, with the card selected.
                 self.overview_filter[self.mode] = gid
@@ -2246,6 +2466,10 @@ class Launcher(Gtk.Application):
         .launcher-drop-marker {{ background: {colors['accent']}; border-radius: 999px;
             box-shadow: 0 0 6px alpha({colors['accent']}, 0.8); }}
         .launcher-new-star-inline {{ color: {colors['yellow']}; font-size: 12px; }}
+        .launcher-legend-text {{ font-size: 13px; }}
+        button.launcher-legend-row {{ padding: 5px 8px; }}
+        /* In a button libadwaita's label colour wins over a plain class. */
+        button label.launcher-new-star, button label.launcher-new-star-inline {{ color: {colors['yellow']}; }}
         .launcher-new-star {{ color: {colors['yellow']}; font-size: 14px; margin: -4px 0 0 -3px;
             text-shadow: 0 0 2px {colors['background']}, 0 0 2px {colors['background']}; }}
         .launcher-folder-hidden-icon {{ opacity: 0.4; filter: grayscale(1); }}
@@ -2382,6 +2606,18 @@ class Launcher(Gtk.Application):
         .launcher-card button, .launcher-card scrollbar, .launcher-card scrollbar slider,
         popover.launcher-popover contents, popover.launcher-popover button {{ border-radius: {radius}px; }}
         """
+        if not POPUP:
+            # The app window: the card is its content; the desktop draws the frame and corners.
+            accent = colors["accent"]
+            css += f"""
+        window#launcher-window {{ background: {bg_hex}; }}
+        .launcher-card.launcher-windowed {{ border: none; border-radius: 0; background: transparent;
+            padding: 4px 17px 17px; }}
+        headerbar.launcher-headerbar {{ background: {bg_hex}; color: {fg_hex}; box-shadow: none; }}
+        .launcher-headerbar-content button.launcher-header-btn {{ padding: 4px; min-width: 0; min-height: 0; }}
+        .launcher-headerbar-content button.launcher-toggle-active {{ background: alpha({accent}, 0.35); }}
+        .launcher-headerbar-content .launcher-view-switch button.launcher-header-btn {{ border-radius: 0; }}
+        """
         provider = Gtk.CssProvider()
         provider.load_from_data(css.encode())
         Gtk.StyleContext.add_provider_for_display(
@@ -2409,9 +2645,11 @@ class Launcher(Gtk.Application):
         if self.mode == "plugins":
             self.load_plugins()
         self.search_query = ""
-        self.resize_to(*self.saved_card_size())  # Within the monitor it opens on.
-        self.move_to(self.position)
-        GLib.idle_add(self.keep_on_screen)
+        self.mark_filter = None
+        if POPUP:
+            self.resize_to(*self.saved_card_size())  # Within the monitor it opens on.
+            self.move_to(self.position)
+            GLib.idle_add(self.keep_on_screen)
         self.update_hidden_button_state()
         try:
             self.refresh_running()
@@ -2421,11 +2659,12 @@ class Launcher(Gtk.Application):
         self.window.present()
         self.tell_dock(True)
         # The dock shows itself now: fit the hole to it once it has, then follow it.
-        GLib.timeout_add(250, self.update_input_region)
+        if POPUP:
+            GLib.timeout_add(250, self.update_input_region)
         if self.dock_space() and not getattr(self, "dock_follow_source", 0):
             self.dock_follow_source = GLib.timeout_add(1000, self.follow_dock)
         self.layer_watch.start()
-        if self.mode == "apps":
+        if self.mode == "apps" and desktop.has_plugins():
             self.prefetch_plugins()
         self.check_updates()
         # Restarted after a language change: back to where the user was.
@@ -2460,6 +2699,9 @@ class Launcher(Gtk.Application):
         if self.shortcut_app is not None:
             self.close_shortcut_page(focus_list=False)
         if self.window and self.window.get_visible():
+            if not POPUP:
+                self.window.close()  # An app window: done, it quits.
+                return
             self.window.set_visible(False)
 
     def toggle(self, mode=None):
@@ -2482,6 +2724,8 @@ class Launcher(Gtk.Application):
         """Replace this process with the updated code. The PID stays, so the
         toggle script still finds it; the new process opens on start."""
         os.environ["SIMPLE_LAUNCHER_MODE"] = mode or ""
+        if not POPUP and self.window is not None:
+            self.on_close_request(self.window)  # The new process opens at the same size.
         sys.stdout.flush()
         sys.stderr.flush()
         os.execv(sys.executable, [sys.executable, str(PLUGIN_DIR / "launcher_popup.py")])
@@ -2544,6 +2788,8 @@ class Launcher(Gtk.Application):
     def prune_uninstalled_shortcuts(self):
         """Drop launcher shortcuts of uninstalled apps, so their keys do not
         stay dead and the bindings they replaced work again."""
+        if not desktop.has_shortcuts():
+            return
         state = copy.deepcopy(self.shortcut_state)
         removed = shortcuts.prune_missing(state)
         names = []
@@ -2564,7 +2810,7 @@ class Launcher(Gtk.Application):
         """Hand-written shortcuts of removed apps live in the user's own files:
         they are only deleted after a yes here, line by line as listed."""
         try:
-            pending = shortcuts.pending_dead_binds()
+            pending = shortcuts.pending_dead_binds() if desktop.has_shortcuts() else []
         except OSError:
             pending = []
         self.dead_binds = [bind for _path, _number, bind in pending]
@@ -2604,7 +2850,7 @@ class Launcher(Gtk.Application):
             self.hide()
 
     def on_active_changed(self, window, _property):
-        if window.get_visible() and not window.is_active():
+        if POPUP and window.get_visible() and not window.is_active():
             GLib.timeout_add(100, self.hide_if_inactive)
 
     def hide_if_inactive(self):
@@ -2830,13 +3076,7 @@ class Launcher(Gtk.Application):
         self.running_scan = True
 
         def work():
-            clients = None
-            try:
-                result = subprocess.run(["hyprctl", "clients", "-j"], capture_output=True, text=True, timeout=2)
-                if result.returncode == 0:
-                    clients = json.loads(result.stdout)
-            except (OSError, ValueError, subprocess.TimeoutExpired):
-                pass
+            clients = desktop.clients()
             names = background_process_names()
             GLib.idle_add(done, clients, names)
 
@@ -2855,13 +3095,9 @@ class Launcher(Gtk.Application):
 
     def refresh_running(self):
         previous = (self.clients, self.process_names)
-        try:
-            result = subprocess.run(["hyprctl", "clients", "-j"],
-                                    capture_output=True, text=True, timeout=2)
-            if result.returncode == 0:
-                self.clients = json.loads(result.stdout)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
-            pass
+        clients = desktop.clients()
+        if clients is not None:
+            self.clients = clients
         self.process_names = background_process_names()
         self.window_children = {}
         return previous != (self.clients, self.process_names)
@@ -2908,7 +3144,8 @@ class Launcher(Gtk.Application):
         if name in self.process_names:
             if name in TERMINALS and not self.terminal_runs_on_its_own(name):
                 return "stopped"
-            return "background"
+            # Without a window list (GNOME, KDE) a running app most likely has one.
+            return "background" if desktop.knows_windows() else "active"
         return "stopped"
 
     def terminal_runs_on_its_own(self, name):
@@ -2936,14 +3173,18 @@ class Launcher(Gtk.Application):
             selected_id = self.row_key(selected) if selected else None
         selected_row = None
         query = self.search_query.casefold().strip()
-        if self.list_bindings is None:
+        if self.list_bindings is None and desktop.has_shortcuts():
             self.list_bindings = shortcuts.Bindings(self.shortcut_state)
 
         def shown(app):
             is_hidden = app["desktop_id"] in self.hidden_ids_for(app)
             # Bar widgets taken out of the bar are hidden too: the eye shows them
             # to put them back. The launcher itself stays, for its own keys.
-            if (is_hidden or self.off_bar(app)) and not self.show_hidden:
+            # The legend's Hidden and Not in bar show them without the eye.
+            if (is_hidden or self.off_bar(app)) and not self.show_hidden \
+                    and self.mark_filter not in ("hidden", "off_bar"):
+                return False
+            if self.mark_filter and not self.has_mark(app, self.mark_filter):
                 return False
             return query in app["name"].casefold()
 
@@ -3022,11 +3263,7 @@ class Launcher(Gtk.Application):
         if is_hidden:
             row.add_css_class("launcher-row-hidden")
         line = Gtk.Box(spacing=8)
-        icon_name = app.get("icon") or "application-x-executable"
-        image_extensions = {".png", ".svg", ".xpm", ".jpg", ".jpeg", ".webp", ".bmp"}
-        themed_name = Path(icon_name).stem if Path(icon_name).suffix.lower() in image_extensions else Path(icon_name).name
-        texture = icon_texture(icon_name) if Path(icon_name).is_file() else None
-        icon = Gtk.Image.new_from_paintable(texture) if texture is not None else Gtk.Image.new_from_icon_name(themed_name)
+        icon = app_image(app.get("icon") or "application-x-executable")
         icon.set_pixel_size(32)
         icon.set_valign(Gtk.Align.CENTER)
         if is_hidden:
@@ -3332,6 +3569,14 @@ class Launcher(Gtk.Application):
         if not open_plugin(app):
             self.notify(_("Could not open {0}").format(app['name']), _("The shell has no panel to open for it."))
 
+    def launch_floating(self, app):
+        """Open an app with its window floating (Hyprland tiles by default)."""
+        if app.get("desktop_id") and newapps.opened(self.seen, app["desktop_id"]):
+            self.save_seen()
+        self.hide()
+        if not launch_floating(app):
+            self.notify(_("Could not open {0}").format(app['name']))
+
     def open_as_admin(self, app):
         """Open app as root: pkexec asks for the password, or sudo in a terminal."""
         process = launch_as_admin(app)
@@ -3469,6 +3714,9 @@ class Launcher(Gtk.Application):
             if app.get("openable", True):
                 add_action(_("Open"), lambda: self.launch(app), "media-playback-start-symbolic",
                            shortcut=chip_for(""))
+                if "plugin_id" not in app and desktop.can_float() and floating_argv(app) is not None:
+                    add_action(_("Open in floating window"), lambda: self.launch_floating(app),
+                               "window-restore-symbolic")
                 if admin_action_enabled() and admin_command(app):
                     add_action(_("Open as administrator"), lambda: self.open_as_admin(app),
                                "dialog-password-symbolic")
@@ -3485,7 +3733,7 @@ class Launcher(Gtk.Application):
             # things): Omarchy's system update, as from the bar's update icon.
             add_action(_("Update system…"), self.update_system, "software-update-available-symbolic")
         # A shortcut needs something to open: not a widget that is only a bar part.
-        if app.get("self_launcher") or app.get("openable", True):
+        if desktop.has_shortcuts() and (app.get("self_launcher") or app.get("openable", True)):
             if not app.get("self_launcher"):
                 add_separator()
             add_action(_("Shortcut…"), lambda: self.open_shortcut_page(app),
@@ -3499,7 +3747,7 @@ class Launcher(Gtk.Application):
             add_action(_("Details…"), lambda: self.open_details_page(app), "dialog-information-symbolic")
             add_action(_("Change icon…"), lambda: self.open_icon_page(app), "image-x-generic-symbolic")
             dock = dock_core.settings()
-            if dock["dock_enabled"] and "plugin_id" not in app:
+            if desktop.has_dock() and dock["dock_enabled"] and "plugin_id" not in app:
                 if app["desktop_id"] in dock["dock_pinned"]:
                     add_action(_("Unpin from dock"), lambda: dock_core.unpin(app["desktop_id"]), "view-pin-symbolic")
                 else:
@@ -4218,6 +4466,14 @@ class Launcher(Gtk.Application):
         grid.attach(label(_("View buttons when small"), views_tip), 0, 4, 1, 1)
         grid.attach(views_switch, 1, 4, 1, 1)
         self.views_switch = views_switch
+        filter_tip = _("The field above the folders when wide. Without it, typing still filters and the title shows what you typed.")
+        filter_switch = Gtk.Switch(active=self.filter_field_on, halign=Gtk.Align.START, valign=Gtk.Align.CENTER)
+        filter_switch.add_css_class("launcher-compact-switch")
+        filter_switch.set_tooltip_text(filter_tip)
+        filter_switch.connect("notify::active", lambda sw, _p: self.set_filter_field(sw.get_active()))
+        grid.attach(label(_("Filter field"), filter_tip), 0, 7, 1, 1)
+        grid.attach(filter_switch, 1, 7, 1, 1)
+        self.filter_switch = filter_switch
         self.corner_choices = corners.CHOICES
         corners_dropdown = Gtk.DropDown.new_from_strings(self.corner_labels())
         corners_dropdown.add_css_class("launcher-compact-dropdown")
@@ -4231,6 +4487,18 @@ class Launcher(Gtk.Application):
         grid.attach(self.corners_label, 0, 5, 1, 1)
         grid.attach(corners_dropdown, 1, 5, 1, 1)
         self.corners_dropdown = corners_dropdown
+        if desktop.NAME == "omarchy":
+            look_tip = _("The colours, light or dark: from the Omarchy theme, or GNOME's Adwaita (light or dark and the accent colour as set in the system). Everything else works the same. App Manager restarts in the new look.")
+            look_dropdown = Gtk.DropDown.new_from_strings([_("Omarchy theme"), _("GNOME (Adwaita)")])
+            look_dropdown.add_css_class("launcher-compact-dropdown")
+            look_dropdown.set_halign(Gtk.Align.START)
+            look_dropdown.set_valign(Gtk.Align.CENTER)
+            look_dropdown.set_tooltip_text(look_tip)
+            look_dropdown.set_selected(desktop.LOOKS.index(saved_look()))
+            look_dropdown.connect("notify::selected", lambda d, _p: self.on_look_selected(desktop.LOOKS[d.get_selected()]))
+            grid.attach(label(_("Look"), look_tip), 0, 6, 1, 1)
+            grid.attach(look_dropdown, 1, 6, 1, 1)
+            self.look_dropdown = look_dropdown
         # What Layout and View buttons do, animated.
         layout_sketch = previews.LayoutSketch(lambda: self.theme.colors,
                                               lambda: (self.wide_layout, self.view_buttons_on,
@@ -4242,8 +4510,9 @@ class Launcher(Gtk.Application):
         # of the card (wide popup) or a hint under it (small popup).
         sections = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         sections.append(self.settings_section(grid, layout_sketch, self.reset_general_settings))
-        sections.append(self.dock_heading)
-        sections.append(self.settings_section(dock_grid, self.dock_sketch, self.reset_dock_settings))
+        if desktop.has_dock():
+            sections.append(self.dock_heading)
+            sections.append(self.settings_section(dock_grid, self.dock_sketch, self.reset_dock_settings))
         # The options grew taller than the popup: they scroll.
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -4406,7 +4675,14 @@ class Launcher(Gtk.Application):
             self.admin_switch.set_active(False)  # Its handler switches the action off properly.
         self.set_wide_layout("folders")
         self.toggle_view("list")
+        self.set_filter_field(True)
         self.corners_dropdown.set_selected(0)  # "Like windows": saves and redraws.
+        if getattr(self, "look_dropdown", None) is not None and saved_look() != "omarchy":
+            # Back to the Omarchy theme: saves and restarts (on this page).
+            if i18n.language_setting() != "auto":
+                i18n.save_language("auto")
+            self.look_dropdown.set_selected(0)
+            return
         if i18n.language_setting() != "auto":
             self.language_dropdown.set_selected(0)  # "System (…)": saves and restarts.
 
@@ -4499,7 +4775,7 @@ class Launcher(Gtk.Application):
         input, so clicks and drags reach the dock under it. Where the dock is
         comes from hyprctl, asked on a thread: a slow answer must never stall
         this popup (its transparent layer would block the whole desktop)."""
-        if self.window is None or getattr(self, "dock_lookup_running", False):
+        if not POPUP or self.window is None or getattr(self, "dock_lookup_running", False):
             return GLib.SOURCE_REMOVE
         if not self.dock_space():
             self.dock_screen_rect = None
@@ -4544,6 +4820,8 @@ class Launcher(Gtk.Application):
     def tell_dock(popup_open):
         """Keep an auto-hiding dock shown while this popup is open: the
         popup's full-screen overlay keeps the pointer from the dock's edge."""
+        if not desktop.has_dock():
+            return
         try:
             if not dock_core.settings()["dock_enabled"]:
                 return
@@ -4556,11 +4834,25 @@ class Launcher(Gtk.Application):
     @staticmethod
     def start_dock():
         """Start the dock (a running one just re-reads its settings)."""
+        if not desktop.has_dock():
+            return
         try:
             subprocess.Popen([sys.executable, str(PLUGIN_DIR / "dock.py")], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError as error:
             print("Could not start the dock:", error, file=sys.stderr)
+
+    def on_look_selected(self, look):
+        """Settings › Look (Omarchy): its theme or GNOME's; a restart applies it."""
+        if look == saved_look():
+            return
+        try:
+            set_look(look)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+            return
+        os.environ["SIMPLE_LAUNCHER_PAGE"] = "settings"
+        self.restart(self.mode)
 
     def on_language_selected(self, dropdown, _param):
         code = self.language_codes[dropdown.get_selected()]
@@ -4676,10 +4968,12 @@ class Launcher(Gtk.Application):
         self.back_button.set_visible(False)
         for button in (self.hidden_button, self.mode_button, self.settings_button):
             button.set_visible(True)
+        self.mode_button.set_visible(desktop.has_plugins())
         self.view_button.set_visible(not self.overview and self.view_buttons_on)
         self.filter_bar.set_visible(self.overview)
-        self.mouse_hint.set_visible(True)
-        self.title.set_hexpand(False)  # The hint takes the free room.
+        # The app window has no mouse hint: the window manager sizes it.
+        self.mouse_hint.set_visible(POPUP)
+        self.title.set_hexpand(not POPUP)  # The hint takes the free room.
         self.update_mouse_hint()
         self.running_button.set_visible(self.mode == "apps")
 
@@ -4690,6 +4984,21 @@ class Launcher(Gtk.Application):
             dropdown.set_selected(self.small_views.index(self.view))
             self.view_syncing = False
         return GLib.SOURCE_REMOVE
+
+    def set_filter_field(self, shown):
+        if shown == self.filter_field_on:
+            return
+        had_focus = self.filter_has_focus()
+        self.filter_field_on = shown
+        try:
+            set_filter_field_shown(shown)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        if getattr(self, "filter_switch", None) is not None and self.filter_switch.get_active() != shown:
+            self.filter_switch.set_active(shown)
+        self.sync_filter_entry()
+        if had_focus:
+            self.grid.grab_focus()  # Typing goes on in the folders.
 
     def set_view_buttons(self, shown):
         if shown == self.view_buttons_on:
@@ -5324,7 +5633,10 @@ class Launcher(Gtk.Application):
 
     def app_shortcuts(self, app, bindings):
         """Combos that open app right now: launcher ones, then external ones.
-        Remembered per shortcut state and bindings snapshot (one per refresh)."""
+        Remembered per shortcut state and bindings snapshot (one per refresh).
+        None without compositor shortcuts (other desktops): no combos."""
+        if bindings is None:
+            return []
         key = (id(self.shortcut_state), id(bindings))
         if getattr(self, "_shortcut_key", None) != key:
             self._shortcut_key, self._shortcut_memo = key, {}
@@ -5932,6 +6244,8 @@ class Launcher(Gtk.Application):
         label = _("Widgets & Plugins") if self.mode == "plugins" else _("Apps")
         if self.show_hidden:
             label += " (" + _("Showing hidden") + ")"
+        if self.mark_filter:
+            label += f" — {self.mark_label(self.mark_filter)}"
         if self.search_query:
             label += f" — {self.search_query}"
         self.title.set_label(label)
@@ -6169,13 +6483,14 @@ class Launcher(Gtk.Application):
         threading.Thread(target=work, daemon=True).start()
 
     def update_system(self):
-        """Omarchy's own update window (password, snapshot, all packages)."""
-        launcher = shutil.which("omarchy-launch-floating-terminal-with-presentation")
-        if launcher is None or shutil.which("omarchy-update") is None:
-            self.notify(_("Could not start the update"), "omarchy-update")
+        """The desktop's update window: Omarchy's own (password, snapshot, all
+        packages), else GNOME Software or KDE Discover."""
+        command = desktop.system_update()
+        if command is None:
+            self.notify(_("Could not start the update"), "omarchy-update" if POPUP else "")
             return
         try:
-            subprocess.Popen([launcher, "omarchy-update"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
         except OSError as error:
             self.notify(_("Could not start the update"), str(error))
@@ -6193,6 +6508,111 @@ class Launcher(Gtk.Application):
         if package:
             return _("Update available: {0} {1} → {2}").format(*package)
         return None
+
+    def legend_popover(self):
+        """The legend: every mark on an app's icon or card, as it looks
+        there, with what it means."""
+        def dot(*classes):
+            mark = Gtk.Box(halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+            for name in classes:
+                mark.add_css_class(name)
+            return mark
+
+        def star():
+            label = Gtk.Label(label="★")
+            label.add_css_class("launcher-new-star-inline")
+            return label
+
+        def symbol(icon_name):
+            image = Gtk.Image.new_from_icon_name(icon_name)
+            image.set_pixel_size(12)
+            image.add_css_class("launcher-folder-hidden-mark")
+            image.set_halign(Gtk.Align.CENTER)
+            return image
+
+        def chip(text, css):
+            label = Gtk.Label(label=text, halign=Gtk.Align.CENTER, valign=Gtk.Align.CENTER)
+            label.add_css_class(css)
+            return label
+
+        rows = [
+            ("active", dot("launcher-run-dot", "active"), _("Running, with open windows")),
+            ("background", dot("launcher-run-dot", "background"), _("Running in the background, no window")),
+            ("update", dot("launcher-update-dot"), _("Update available: Update in its menu")),
+            ("new", star(), _("New: installed recently (until you open it), or a new group (until it has an entry)")),
+            ("hidden", symbol("view-conceal-symbolic"), _("Hidden: shown only with the eye button")),
+        ]
+        if not desktop.knows_windows():
+            # Every running app counts as open there: no yellow dots.
+            rows = [row for row in rows if row[0] != "background"]
+            rows[0] = ("active", rows[0][1], _("Running"))
+        if desktop.has_plugins():
+            rows.append(("off_bar", symbol("list-remove-symbolic"), _("Plugin not in the bar")))
+        if desktop.has_shortcuts():
+            rows.append(("shortcut", chip("Super + B", "launcher-shortcut-chip"), _("Its global shortcut")))
+            rows.append(("more_shortcuts", chip("+1", "launcher-shortcut-more"), _("More shortcuts: Shortcut… in its menu")))
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+        title = Gtk.Label(label=_("What the marks mean"), xalign=0)
+        title.add_css_class("sc-section")
+        title.set_margin_start(8)
+        title.set_margin_bottom(4)
+        box.append(title)
+        popover = Gtk.Popover()
+        popover.add_css_class("launcher-popover")
+        # Every row is a button: only the entries with that mark (again: all).
+        # One column for the marks: same width in every row (the widest mark,
+        # the shortcut chip), each mark centred in it; only the text expands.
+        sizes = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+        for mark_id, mark, text in rows:
+            mark.set_halign(Gtk.Align.CENTER)
+            mark.set_valign(Gtk.Align.CENTER)
+            slot = Gtk.CenterBox(valign=Gtk.Align.CENTER, hexpand=False)
+            slot.set_center_widget(mark)
+            sizes.add_widget(slot)
+            label = Gtk.Label(label=text, xalign=0, halign=Gtk.Align.FILL, hexpand=True,
+                              wrap=True, max_width_chars=44)
+            label.add_css_class("launcher-legend-text")
+            line = Gtk.Box(spacing=12)
+            line.append(slot)
+            line.append(label)
+            button = Gtk.Button(child=line)
+            button.add_css_class("flat")
+            button.add_css_class("launcher-legend-row")
+            if mark_id == self.mark_filter:
+                button.add_css_class("launcher-toggle-active")
+            button.set_tooltip_text(_("Show only these (click again or Esc: all)"))
+            button.connect("clicked", lambda _b, m=mark_id: (popover.popdown(), self.set_mark_filter(m)))
+            box.append(button)
+        popover.set_child(box)
+        return popover
+
+    def set_mark_filter(self, mark_id):
+        """Show only the entries with this legend mark; the same again: all."""
+        self.mark_filter = None if mark_id == self.mark_filter else mark_id
+        self.refresh_list()
+
+    def mark_label(self, mark_id):
+        return {"active": _("Open windows") if desktop.knows_windows() else _("Running"), "background": _("Running in background"),
+                "update": _("Update"), "new": _("Newly installed"), "hidden": _("Hidden"),
+                "off_bar": _("Not in bar"), "shortcut": _("Shortcuts"),
+                "more_shortcuts": _("Shortcuts") + " +1"}[mark_id]
+
+    def has_mark(self, app, mark_id):
+        """Whether app shows this legend mark (the list and cards' marks)."""
+        if mark_id in ("active", "background"):
+            return self.app_state(app) == mark_id
+        if mark_id == "update":
+            return bool(self.update_note(app))
+        if mark_id == "new":
+            return self.is_new(app)
+        if mark_id == "hidden":
+            return app["desktop_id"] in self.hidden_ids_for(app)
+        if mark_id == "off_bar":
+            return self.off_bar(app)
+        count = len(self.app_shortcuts(app, self.list_bindings))
+        return count >= (2 if mark_id == "more_shortcuts" else 1)
 
     def update_badge(self, note):
         badge = self.tile_badge("software-update-available-symbolic", _("Update"))
@@ -6227,6 +6647,8 @@ class Launcher(Gtk.Application):
         return seen, items + plugins
 
     def toggle_mode(self, *_args):
+        if not desktop.has_plugins():
+            return  # Apps only: no shell plugins outside Omarchy.
         if self.actions_menu_open():
             self.actions_popover.popdown()
         self.mode = "apps" if self.mode == "plugins" else "plugins"
@@ -6243,10 +6665,8 @@ class Launcher(Gtk.Application):
 
     def close_app(self, app):
         for client in self.clients:
-            if self.window_matches(client, app) and client.get("address", "").startswith("0x"):
-                command = "hl.dsp.window.close({window = " + json.dumps("address:" + client["address"]) + "})"
-                subprocess.Popen(["hyprctl", "dispatch", command],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if self.window_matches(client, app):
+                desktop.close_window(client)
         GLib.timeout_add(300, self.refresh_after_close)
 
     def refresh_after_close(self):

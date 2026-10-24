@@ -236,6 +236,16 @@ def set_corners(value, path=None):
     _save_setting("corners", corners.choice(value), path)
 
 
+def saved_look(path=None):
+    """Settings › Look on Omarchy: "omarchy" (its theme; the default) or
+    "adwaita" (GNOME's look: libadwaita and its colours)."""
+    return "adwaita" if _load_settings(path).get("look") == "adwaita" else "omarchy"
+
+
+def set_look(value, path=None):
+    _save_setting("look", "adwaita" if value == "adwaita" else "omarchy", path)
+
+
 def view_buttons_shown(path=None):
     """The list | groups | origin buttons in the small popup's header (a
     setting, off by default: the plain list)."""
@@ -244,6 +254,16 @@ def view_buttons_shown(path=None):
 
 def set_view_buttons_shown(shown, path=None):
     _save_setting("view_buttons", bool(shown), path)
+
+
+def filter_field_shown(path=None):
+    """The filter field above the folders (a setting, on by default; its ×
+    turns it off). Without it, typing still filters, shown in the title."""
+    return _load_settings(path).get("filter_field") is not False
+
+
+def set_filter_field_shown(shown, path=None):
+    _save_setting("filter_field", bool(shown), path)
 
 
 def saved_size(key, path=None):
@@ -1260,6 +1280,65 @@ def launch_app(app):
     # rejection must remain a failure instead of gaining shell semantics.
 
     return False
+
+
+_icon_files = {}
+
+
+def icon_data_dirs(environ=None):
+    """The XDG data directories, the user's first (as the icon spec)."""
+    environ = os.environ if environ is None else environ
+    home = environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    system = environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    return [Path(home)] + [Path(d) for d in system.split(":") if d]
+
+
+def icon_file_for(name, data_dirs=None):
+    """The file of a hicolor or pixmaps icon called name, looked up on disk:
+    for names the icon theme does not know because an icon-theme.cache is
+    older than the icons added since (GTK then trusts the stale cache).
+    Scalable first, then the largest size; None when there is none."""
+    if not name or "/" in name or name.startswith("."):
+        return None
+    dirs = icon_data_dirs() if data_dirs is None else data_dirs
+    key = (name, tuple(dirs))
+    if key in _icon_files:
+        return _icon_files[key]
+    found = None
+    for base in dirs:
+        hicolor = base / "icons/hicolor"
+        candidates = [hicolor / "scalable/apps" / f"{name}.svg"]
+        try:
+            sizes = [d.name for d in hicolor.iterdir() if re.fullmatch(r"\d+x\d+(@\d+)?", d.name)]
+        except OSError:
+            sizes = []
+        sizes.sort(key=lambda d: int(d.split("x")[0]), reverse=True)
+        candidates += [hicolor / size / "apps" / f"{name}.png" for size in sizes]
+        candidates += [base / "pixmaps" / f"{name}.{ext}" for ext in ("svg", "png", "xpm")]
+        found = next((c for c in candidates if c.is_file()), None)
+        if found is not None:
+            break
+    _icon_files[key] = found
+    return found
+
+
+def floating_argv(app, action_id=None):
+    """The command that opens app (or one of its desktop actions) for a
+    floating start, the same way launch_app does; None when there is none."""
+    if "argv" in app:
+        return None if action_id else list(app["argv"])
+    desktop_path = app.get("desktop_path", "")
+    if not desktop_path or not shutil.which("uwsm-app"):
+        return None
+    target = uwsm_desktop_arg(desktop_path)
+    return ["uwsm-app", "--", f"{target}:{action_id}" if action_id else target]
+
+
+def launch_floating(app, action_id=None):
+    """Open app with its window floating (Hyprland tiles by default)."""
+    import desktop
+    argv = floating_argv(app, action_id)
+    return argv is not None and desktop.can_float() and desktop.exec_floating(argv)
 
 
 def launch_action(app, action_id):
