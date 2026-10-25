@@ -6,8 +6,7 @@ key on a key map that shows who owns every key, pin them to the Dash, and look
 up where each one lives and which package it came from.
 
 A GTK 4 / libadwaita app for GNOME (tested on GNOME 51, Wayland). It is a
-fork of the Omarchy plugin *App Manager*, rebuilt for GNOME; local and not
-published.
+fork of the Omarchy plugin *App Manager*, rebuilt for GNOME.
 
 ## Install
 
