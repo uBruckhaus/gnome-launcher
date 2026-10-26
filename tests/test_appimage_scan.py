@@ -77,17 +77,60 @@ class AppImageScanTests(unittest.TestCase):
         self.assertEqual([a["desktop_id"] for a in apps], ["tool-0.14.0-x86_64"])
 
     def test_desktop_entry_exec_marks_its_appimage_as_started(self):
+        image = "/home/u/My App-1.2.0-x86_64.AppImage"
+        self.assertEqual(self.started_by(f"/usr/bin/env '{image}' --no-sandbox %U"), {image})
+
+    def test_env_by_path_checks_the_real_program(self):
+        self.assertFalse(launcher_core.executable_exists("/usr/bin/env X=1 /nonexistent/Tool.AppImage"))
+        self.assertTrue(launcher_core.executable_exists("/usr/bin/env X=1 sh -c true"))
+
+    def test_digit_words_in_the_name_stay(self):
+        self.assertEqual(launcher_core.appimage_base_name("Foo-3D-1.0"), "Foo 3D")
+        self.assertEqual(launcher_core.appimage_base_name("Tool-1.0-rc1-x86_64"), "Tool")
+        self.assertEqual(launcher_core.appimage_base_name("Tool-x86_64"), "Tool")
+
+    def test_final_release_beats_its_prereleases(self):
+        for names, newest in ((["Tool-1.0rc1.AppImage", "Tool-1.0.AppImage"], "Tool-1.0"),
+                              (["Tool-1.0-beta2.AppImage", "Tool-1.0.AppImage"], "Tool-1.0"),
+                              (["Tool-1.0-rc1.AppImage", "Tool-1.0-rc2.AppImage"], "Tool-1.0-rc2"),
+                              (["Tool-1.0+build99.AppImage", "Tool-1.1.AppImage"], "Tool-1.1")):
+            self.assertEqual([a["desktop_id"] for a in self.scan(names)], [newest], names)
+
+    def test_other_versions_stay_hidden_when_embedded_names_differ(self):
+        def fake_read(argv, **_kwargs):
+            name = "Tool Community" if "0.9" in argv[3] else "Tool"
+            return f"[Desktop Entry]\nName={name}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("tool-0.9.0.AppImage", "tool-1.0.0.AppImage"):
+                path = Path(tmp) / name
+                path.write_bytes(b"app")
+                path.chmod(0o750)
+            with patch.object(launcher_core, "get_appimage_directories", return_value=[Path(tmp)]), \
+                    patch.object(launcher_core.shutil, "which", return_value="/usr/bin/7z"), \
+                    patch.object(launcher_core, "read_bounded_output", side_effect=fake_read):
+                apps = launcher_core.scan_standalone_appimages(set())
+        self.assertEqual([a["desktop_id"] for a in apps], ["tool-1.0.0"])
+
+    def started_by(self, exec_line):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
-            image = directory / "My App-1.2.0-x86_64.AppImage"
-            (directory / "myapp.desktop").write_text(
-                "[Desktop Entry]\nType=Application\nName=Installed Name\n"
-                f"Exec=/usr/bin/env '{image}' --no-sandbox %U\n")
+            (directory / "entry.desktop").write_text(
+                f"[Desktop Entry]\nType=Application\nName=Entry\nExec={exec_line}\n")
             with patch.object(launcher_core, "DESKTOP_DIRS", [directory]), \
+                    patch.object(launcher_core, "executable_exists", return_value=True), \
                     patch.object(launcher_core, "scan_standalone_appimages", return_value=[]) as scan, \
                     patch.object(launcher_core.cli_tools, "cli_entries", return_value=[]):
                 launcher_core.parse_desktop_files()
-            self.assertEqual(set(scan.call_args.args[1]), {str(image)})
+            return set(scan.call_args.args[1])
+
+    def test_only_the_started_program_counts(self):
+        # Opened as a file by another program: not the AppImage's own entry.
+        self.assertEqual(self.started_by("/usr/bin/editor /home/u/Tool-1.0.AppImage"), set())
+        self.assertEqual(self.started_by("env X=/a/b.AppImage /usr/bin/editor"), set())
+        self.assertEqual(self.started_by("env -i X=1 /home/u/Tool-1.0.AppImage %U"), {"/home/u/Tool-1.0.AppImage"})
+
+    def test_extension_case_does_not_matter(self):
+        self.assertEqual(self.started_by("/home/u/Tool-1.0.APPIMAGE"), {"/home/u/Tool-1.0.APPIMAGE"})
 
 
 if __name__ == "__main__":

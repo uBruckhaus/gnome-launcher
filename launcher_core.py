@@ -332,21 +332,25 @@ def browser_web_app(app):
     return WEB_APP_BROWSERS.get(Path(argv[0]).name, _("the browser"))
 
 
-def executable_exists(command):
-    """Check the program named by a desktop entry without running it."""
+def exec_program(command):
+    """The program a desktop entry's Exec line starts (after an env prefix
+    and its VAR=value words), or None."""
     try:
         parts = shlex.split(command)
     except ValueError:
-        return False
-    if not parts:
-        return False
-    if parts[0] == "env":
+        return None
+    if parts and Path(parts[0]).name == "env":
         parts = parts[1:]
         while parts and ("=" in parts[0] or parts[0] in ("-i", "--ignore-environment")):
             parts = parts[1:]
-    if not parts:
+    return parts[0] if parts else None
+
+
+def executable_exists(command):
+    """Check the program named by a desktop entry without running it."""
+    program = exec_program(command)
+    if not program:
         return False
-    program = parts[0]
     return os.access(program, os.X_OK) if "/" in program else shutil.which(program) is not None
 
 
@@ -417,10 +421,9 @@ def parse_desktop_files():
     # An AppImage a .desktop file already starts (an installer wrote one) is that app.
     started = set()
     for app in apps:
-        try:
-            started.update(arg for arg in shlex.split(app.get("exec", "")) if arg.endswith((".AppImage", ".appimage")))
-        except ValueError:
-            pass
+        program = exec_program(app.get("exec", ""))
+        if program and program.casefold().endswith(".appimage"):
+            started.add(program)
     apps.extend(scan_standalone_appimages(seen_names, started))
     # CLI agents installed with mise (Codex, Copilot, …) that no .desktop file opens.
     known = set()
@@ -678,34 +681,74 @@ _APPIMAGE_NOISE = {"linux", "gnu", "appimage", "x86", "x64", "x86-64", "amd64", 
                    "aarch64", "arm64", "armhf", "armv7l", "universal", "portable"}
 
 
+# A version word: "1.0", "v2", "0.14.0", "1.0rc1", "1.0+build5", or plain digits.
+_VERSION_WORD = re.compile(r"v?\d+(?:\.\d+)*(?:[.+~]?[a-z][\w.+~]*)?|v?\d+(?:\.\d+)+[\w.+~]*", re.IGNORECASE | re.ASCII)
+_RELEASE = re.compile(r"v?(\d+(?:\.\d+)*)(.*)", re.IGNORECASE | re.ASCII)
+_PRERELEASE = re.compile(r"[.~-]?(alpha|beta|preview|pre|rc|dev|nightly|a|b)\.?(\d*)", re.IGNORECASE | re.ASCII)
+# CPU names hold digits too (x86_64): never part of the name or the version.
+_CPU = re.compile(r"[-_ ]?(?:x86[-_]64|aarch64|arm64|amd64|armv7l|i[36]86)(?=$|[-_ .])", re.IGNORECASE)
+
+
+def _is_version(word):
+    """A version word; one that only starts with a digit (3D, 2048game) is a name."""
+    if not _VERSION_WORD.fullmatch(word):
+        return False
+    release = _RELEASE.fullmatch(word)
+    tail = release.group(2)
+    # "3D": digits then letters with no dot and no prerelease tag is a name.
+    return not tail or "." in release.group(1) or bool(_PRERELEASE.fullmatch(tail)) or tail[0] in ".+~" \
+        or word[0] in "vV"
+
+
+def _appimage_words(stem):
+    """(name words, version words) of an AppImage file name: the name ends
+    at the first version word after the first word."""
+    words = [w for w in re.split(r"[-_ ]+", _CPU.sub("", stem)) if w]
+    cut = next((i for i, w in enumerate(words) if i and _is_version(w)), len(words))
+    name = [w for i, w in enumerate(words[:cut]) if not (i and w.casefold() in _APPIMAGE_NOISE)]
+    return name, words[cut:]
+
+
 def appimage_base_name(stem):
     """The app's name in an AppImage file name: "photocraft-0.14.0-linux-x86_64"
-    → "photocraft", "Asterism-0.7.0-x86_64" → "Asterism"."""
-    words = [w for w in re.split(r"[-_ ]+", stem) if w]
-    kept = [w for i, w in enumerate(words)
-            if not (i and (w.casefold() in _APPIMAGE_NOISE or re.fullmatch(r"v?\d[\w.+]*", w, re.IGNORECASE)))]
-    return " ".join(kept) or stem
+    → "photocraft", "Asterism-0.7.0-x86_64" → "Asterism", "Foo-3D-1.0" → "Foo 3D"."""
+    return " ".join(_appimage_words(stem)[0]) or stem
 
 
 def _name_key(name):
     return re.sub(r"[-_ ]", "", name.strip().casefold())
 
 
-def _version(word):
-    """A version word's numbers ("v2.0" → (2, 0)), or None for any other word."""
-    if not re.fullmatch(r"v?\d[\w.+]*", word, re.IGNORECASE):
-        return None
-    return tuple(int(n) for n in re.findall(r"\d+", word))
+def _version_key(stem):
+    """Comparable version of an AppImage file name, larger is newer: the
+    release numbers, then final above prerelease (1.0 > 1.0rc2 > 1.0rc1);
+    build metadata (+build5) does not count."""
+    release, pre = [], None
+    for word in _appimage_words(stem)[1]:
+        word = word.split("+", 1)[0]
+        tag = _PRERELEASE.fullmatch(word)
+        if tag:
+            pre = pre or (int(tag.group(2) or 0),)
+            continue
+        match = _RELEASE.fullmatch(word)
+        if not match:
+            continue
+        release.extend(int(n) for n in match.group(1).split("."))
+        tail = _PRERELEASE.fullmatch(match.group(2)) if match.group(2) else None
+        if tail:
+            pre = pre or (int(tail.group(2) or 0),)
+    # Trailing zeros do not matter: 1.0 is 1.0.0.
+    while release and release[-1] == 0:
+        release.pop()
+    return (tuple(release), 0 if pre else 1, pre or ())
 
 
-def _newest_first(path):
-    """Sort key: one app's versions together, the newest first (0.14.0 before 0.9.0, v2.0 before 1.0)."""
-    # CPU names hold digits too (x86_64): not part of the version.
-    stem = re.sub(r"x86[-_]64|aarch64|arm64|amd64|armv7l|i[36]86", "", path.stem, flags=re.IGNORECASE)
-    words = [w for w in re.split(r"[-_ ]+", stem) if w]
-    numbers = [v for w in words[1:] if (v := _version(w)) is not None]
-    # Negated, with an end mark after them: 1.0.1 (−1, 0, −1, 1) comes before 1.0 (−1, 0, 1).
-    return (_name_key(appimage_base_name(path.stem)), [-n for v in numbers for n in v] + [1], path.name)
+def _sorted_newest_first(paths):
+    """One app's versions together, the newest first (0.14.0 before 0.9.0, v2.0 before 1.0)."""
+    paths = sorted(paths, key=lambda p: p.name)
+    paths.sort(key=lambda p: _version_key(p.stem), reverse=True)
+    paths.sort(key=lambda p: _name_key(appimage_base_name(p.stem)))
+    return paths
 
 
 def scan_standalone_appimages(seen_names, started=()):
@@ -719,12 +762,15 @@ def scan_standalone_appimages(seen_names, started=()):
     # All folders at once: a newer version in another folder still wins.
     found = [path for directory in get_appimage_directories()
              for path in directory.glob("*.[aA][pP][pP][iI][mM][aA][gG][eE]")]
-    for path in sorted(found, key=_newest_first):
+    for path in _sorted_newest_first(found):
         # Discovery must respect user permissions, never make files executable.
         if not path.is_file() or not os.access(path, os.X_OK):
             continue
-        if str(path) in started or _name_key(appimage_base_name(path.stem)) in taken:
+        identity = _name_key(appimage_base_name(path.stem))
+        if str(path) in started or identity in taken:
             continue
+        # The newest version stands for the older ones, whatever names they carry inside.
+        taken.add(identity)
 
         app_name = ""
         app_desc = ""
