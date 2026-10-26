@@ -7,6 +7,7 @@ import re
 import selectors
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -231,6 +232,20 @@ def set_corners(value, path=None):
     _save_setting("corners", corners.choice(value), path)
 
 
+APP_ICON_SIZES = (32, 40, 44, 48, 56, 64)   # Settings › App icon size, as the dock's Icon size
+DEFAULT_APP_ICON_SIZE = 44
+
+
+def saved_app_icon_size(path=None):
+    """The app icons' size on the cards in px (the list's are 12 px smaller)."""
+    value = _load_settings(path).get("app_icon_size")
+    return value if value in APP_ICON_SIZES and not isinstance(value, bool) else DEFAULT_APP_ICON_SIZE
+
+
+def set_app_icon_size(value, path=None):
+    _save_setting("app_icon_size", value if value in APP_ICON_SIZES else DEFAULT_APP_ICON_SIZE, path)
+
+
 def view_buttons_shown(path=None):
     """The list | groups | origin buttons in the narrow window's header (a
     setting, off by default: the plain list)."""
@@ -368,10 +383,35 @@ def exec_program(command):
     return parts[0] if parts else None
 
 
+def env_changes_path(command):
+    """An env prefix sets or clears PATH (PATH=…, -i, -u PATH): a bare program
+    name is then looked up in a PATH this process does not have."""
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts or Path(parts[0]).name != "env":
+        return False
+    words = iter(parts[1:])
+    for word in words:
+        if word.startswith("PATH=") or word in ("-i", "--ignore-environment", "--unset=PATH"):
+            return True
+        if word in _ENV_WITH_VALUE:
+            if next(words, "") == "PATH":
+                return True
+        elif not (word in _ENV_FLAGS or word == "--" or word.startswith("--unset=")
+                  or _ENV_ASSIGNMENT.fullmatch(word)):
+            return False            # the program (or a form exec_program does not know)
+    return False
+
+
 def executable_exists(command):
     """Check the program named by a desktop entry without running it. An
-    env form exec_program does not know: env itself is checked."""
+    env form exec_program does not know, or one that changes PATH for a bare
+    program name: env itself is checked."""
     program = exec_program(command)
+    if program and "/" not in program and env_changes_path(command):
+        program = None
     if not program:
         try:
             parts = shlex.split(command)
@@ -652,11 +692,21 @@ def icon_bytes(path):
     path = Path(path)
     is_svg = path.suffix.lower() in (".svg", ".svgz")
     cap = MAX_SVG_ICON_BYTES if is_svg else MAX_ICON_FILE_BYTES
+    # O_NONBLOCK: a FIFO swapped in for the file (a tray app names its own icon path) can
+    # neither block the open nor the read; only a regular file is read at all.
     try:
-        with open(path, "rb") as handle:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | getattr(os, "O_NOCTTY", 0))
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
             data = handle.read(cap + 1)
     except OSError:
         return None
+    finally:
+        os.close(fd)
     if not data or len(data) > cap:
         return None
     if is_svg:
@@ -925,6 +975,29 @@ def process_pids(name):
         except (OSError, ValueError):
             continue
     return pids
+
+
+def end_processes(name, pids):
+    """SIGTERM each of `pids` that is still this user's process called `name`. A
+    pidfd is opened first and the process checked after that, so a PID that was
+    reused meanwhile by another program gets nothing (the pidfd stays bound to
+    the process it was opened for). Returns how many were signalled."""
+    ended = 0
+    for pid in pids:
+        try:
+            fd = os.pidfd_open(pid)
+        except (OSError, AttributeError):
+            continue
+        try:
+            process = Path(f"/proc/{pid}")
+            if process.stat().st_uid == os.getuid() and Path(os.readlink(process / "exe")).name.casefold() == name:
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                ended += 1
+        except (OSError, ValueError):
+            pass
+        finally:
+            os.close(fd)
+    return ended
 
 
 def background_process_names():

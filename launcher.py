@@ -27,11 +27,12 @@ import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 from launcher_core import (  # noqa: E402
-    TERMINALS, app_process_name, background_process_names, process_pids, terminal_command,
+    TERMINALS, app_process_name, background_process_names, process_pids, end_processes, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
     saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown, filter_field_shown,
     set_filter_field_shown, saved_corners, set_corners, saved_size, set_saved_size,
+    APP_ICON_SIZES, DEFAULT_APP_ICON_SIZE, saved_app_icon_size, set_app_icon_size,
     set_admin_action, forget_saved_admin_action, clipboard_text, launch_action, launch_app, launch_as_admin,
     load_hidden_apps, parse_desktop_files, save_hidden_apps, icon_bytes, icon_file_for,
 )
@@ -279,6 +280,7 @@ class Launcher(Adw.Application):
         # The list | groups | origin buttons in the narrow window's header are
         # a setting, off by default; then it shows the plain list.
         self.view_buttons_on = view_buttons_shown()
+        self.app_icon_px = saved_app_icon_size()
         self.filter_field_on = filter_field_shown()
         # The overview (window two or more columns wide): the same entries
         # as cards, one group (or all) at a time, picked in the filter bar
@@ -1243,7 +1245,7 @@ class Launcher(Adw.Application):
             tile.add_css_class("launcher-row-hidden")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         top = Gtk.Box(spacing=6)
-        icon = self.app_icon(app, 44)
+        icon = self.app_icon(app, self.app_icon_px)
         if is_hidden:
             icon.add_css_class("launcher-hidden-icon")
         icon_slot = Gtk.Overlay()
@@ -2482,7 +2484,7 @@ class Launcher(Adw.Application):
             row.add_css_class("launcher-row-hidden")
         line = Gtk.Box(spacing=8)
         icon = app_image(app.get("icon") or "application-x-executable")
-        icon.set_pixel_size(32)
+        icon.set_pixel_size(self.app_icon_px - 12)      # Settings › App icon size (32 px by default)
         icon.set_valign(Gtk.Align.CENTER)
         if is_hidden:
             icon.add_css_class("launcher-hidden-icon")
@@ -3437,6 +3439,17 @@ class Launcher(Adw.Application):
         corners_dropdown.set_selected(self.corner_choices.index(saved_corners()))
         corners_dropdown.connect("notify::selected", lambda d, _p: getattr(self, "corners_syncing", False)
                                  or self.set_corners(self.corner_choices[d.get_selected()]))
+        icon_tip = _("How large the app icons are on the cards; the list's are a little smaller. Like the dock's Icon size.")
+        icon_dropdown = Gtk.DropDown.new_from_strings([f"{v} px" for v in APP_ICON_SIZES])
+        icon_dropdown.add_css_class("launcher-compact-dropdown")
+        icon_dropdown.set_halign(Gtk.Align.START)
+        icon_dropdown.set_valign(Gtk.Align.CENTER)
+        icon_dropdown.set_tooltip_text(icon_tip)
+        icon_dropdown.set_selected(APP_ICON_SIZES.index(self.app_icon_px))
+        icon_dropdown.connect("notify::selected", lambda d, _p: self.set_app_icon_px(APP_ICON_SIZES[d.get_selected()]))
+        grid.attach(label(_("App icon size"), icon_tip), 0, 9, 1, 1)
+        grid.attach(icon_dropdown, 1, 9, 1, 1)
+        self.icon_size_dropdown = icon_dropdown
         self.corners_label = label(_("Corners"), self.corners_tip())
         grid.attach(self.corners_label, 0, 5, 1, 1)
         grid.attach(corners_dropdown, 1, 5, 1, 1)
@@ -3510,6 +3523,7 @@ class Launcher(Adw.Application):
         self.set_filter_field(True)
         self.topbar_switch.set_active(False)
         self.corners_dropdown.set_selected(0)  # "Like windows": saves and redraws.
+        self.icon_size_dropdown.set_selected(APP_ICON_SIZES.index(DEFAULT_APP_ICON_SIZE))
 
     def sync_previews(self):
         wide = getattr(self, "overview", False)
@@ -3661,6 +3675,18 @@ class Launcher(Adw.Application):
             dropdown.set_selected(self.small_views.index(self.view))
             self.view_syncing = False
         return GLib.SOURCE_REMOVE
+
+    def set_app_icon_px(self, size):
+        """Settings › App icon size: saved, and the cards and the list drawn again at once."""
+        if size == self.app_icon_px:
+            return
+        self.app_icon_px = size
+        try:
+            set_app_icon_size(size)
+        except OSError as error:
+            self.notify(_("Could not save the setting"), str(error))
+        row = self.selected_item()
+        self.refresh_list(selected_id=self.row_key(row) if row is not None else None)
 
     def set_filter_field(self, shown):
         if shown == self.filter_field_on:
@@ -4888,11 +4914,8 @@ class Launcher(Adw.Application):
             return None
 
         def end():
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except OSError:
-                    pass
+            # The menu may have stayed open a while: only processes that still are this app.
+            end_processes(name, pids)
             GLib.timeout_add(800, self.refresh_after_close)
         return end
 
