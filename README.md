@@ -49,7 +49,21 @@ then **its own menu › Shortcut…**.
   a terminal, your own desktop entry or AppImage to the trash; for a browser
   web app it says how to remove it in the browser.
 - **Quit** ends a running app (SIGTERM). GNOME does not tell other apps which
-  windows are open, so "running" means its process runs.
+  windows are open, so "running" means its process runs. Quit ends only
+  processes of the app's own executable: the program its entry starts (for a
+  terminal app, the command after `-e`), resolved to its real absolute path,
+  must be the very file `/proc/<pid>/exe` points to; a program with the same
+  name in another folder does not count. Apps that run through a shared
+  interpreter or wrapper (`python3.14 app.py`, `node`, `bash`, `env`,
+  `flatpak`, version-manager shims and the like), as a browser web app or
+  from a relative path, and apps whose executable another desktop entry may
+  start as well (hidden entries and other entries' actions count too, by any
+  word of their command line that has the same program name or is a symlink
+  to the same file) get no Quit. Right before the signal each process is
+  checked again through a pidfd for the same executable and start time.
+- Desktop entries are read only when they are regular files of at most
+  256 KiB, opened without blocking, so a FIFO or a huge file in an
+  applications folder can neither freeze nor exhaust the launcher.
 - **Details…:** type, origin, default-app roles, desktop file, program,
   package, version, size, install date and website, with copy buttons.
 - **Change icon…:** icons from three open icon collections (searched online

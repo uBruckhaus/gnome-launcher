@@ -19,7 +19,7 @@ import cli_tools
 import corners
 
 gi.require_version('GioUnix', '2.0')
-from gi.repository import GioUnix
+from gi.repository import GioUnix, GLib
 
 CONFIG_DIR = Path.home() / ".config/gnome-launcher"
 HIDDEN_FILE = CONFIG_DIR / "hidden.json"
@@ -363,24 +363,26 @@ def exec_program(command):
         parts = shlex.split(command)
     except ValueError:
         return None
+    # An index, not list slices: thousands of VAR=value words stay linear.
+    i = 0
     if parts and Path(parts[0]).name == "env":
-        parts = parts[1:]
-        while parts:
-            word = parts[0]
+        i = 1
+        while i < len(parts):
+            word = parts[i]
             if word in _ENV_FLAGS or word.startswith("--unset=") or _ENV_ASSIGNMENT.fullmatch(word):
-                parts = parts[1:]
+                i += 1
             elif word in _ENV_WITH_VALUE:
-                parts = parts[2:]
+                i += 2
             elif word == "--":
-                parts = parts[1:]
-                while parts and _ENV_ASSIGNMENT.fullmatch(parts[0]):
-                    parts = parts[1:]
+                i += 1
+                while i < len(parts) and _ENV_ASSIGNMENT.fullmatch(parts[i]):
+                    i += 1
                 break
             elif word.startswith("-"):
                 return None
             else:
                 break
-    return parts[0] if parts else None
+    return parts[i] if i < len(parts) else None
 
 
 def env_changes_path(command):
@@ -425,8 +427,44 @@ def executable_exists(command):
     return os.access(program, os.X_OK) if "/" in program else shutil.which(program) is not None
 
 
+# A desktop entry is a few KiB; anything far larger is not one.
+MAX_DESKTOP_FILE_BYTES = 256 * 1024
+
+
+def read_desktop_file(path, cap=MAX_DESKTOP_FILE_BYTES):
+    """The text of a desktop entry, or None when it is not a regular file or
+    larger than cap. O_NONBLOCK: a FIFO (or a symlink to one) in an
+    applications folder can neither block the open nor the read; the size is
+    checked on the opened descriptor and the read itself stops after cap + 1
+    bytes, so an endless source cannot exhaust memory."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC | getattr(os, "O_NOCTTY", 0))
+    except (OSError, ValueError):
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > cap:
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(cap + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > cap:
+        return None
+    return data.decode("utf-8", errors="ignore")
+
+
+# (desktop id, Exec line) of every desktop entry the last scan read, before
+# any filtering; quit_target checks them for a shared executable.
+ENTRY_EXECS = []
+
+
 def parse_desktop_files():
+    global ENTRY_EXECS
     apps, seen_desktop_ids, seen_names = [], set(), set()
+    entry_execs = []
     for directory in DESKTOP_DIRS:
         if not directory.is_dir():
             continue
@@ -438,18 +476,23 @@ def parse_desktop_files():
             seen_desktop_ids.add(desktop_id)
 
             values, section, action_execs = {}, None, {}
-            try:
-                for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    line = raw.strip()
-                    if line.startswith("["):
-                        section = line.strip("[]")
-                    elif section == "Desktop Entry" and "=" in line:
-                        key, value = line.split("=", 1)
-                        values[key] = value
-                    elif (section or "").startswith("Desktop Action ") and line.startswith("Exec="):
-                        action_execs[section.removeprefix("Desktop Action ")] = line[5:]
-            except OSError:
+            text = read_desktop_file(path)
+            if text is None:
                 continue
+            for raw in text.splitlines():
+                line = raw.strip()
+                if line.startswith("["):
+                    section = line.strip("[]")
+                elif section == "Desktop Entry" and "=" in line:
+                    key, value = line.split("=", 1)
+                    values[key] = value
+                elif (section or "").startswith("Desktop Action ") and line.startswith("Exec="):
+                    action_execs[section.removeprefix("Desktop Action ")] = line[5:]
+            # Every entry counts for Quit's "executable shared by another entry"
+            # check, also those hidden (NoDisplay), deduplicated or failing TryExec.
+            for line in [values.get("Exec")] + list(action_execs.values()):
+                if line:
+                    entry_execs.append((path.stem, line))
             name, command = values.get("Name"), values.get("Exec")
             if not name or not command:
                 continue
@@ -471,7 +514,10 @@ def parse_desktop_files():
             command = re.sub(r"%[a-zA-Z]", "", command).strip()
             actions = []
             try:
-                info = GioUnix.DesktopAppInfo.new_from_filename(str(path))
+                # From the bytes read above: the file is not opened a second time.
+                keyfile = GLib.KeyFile()
+                keyfile.load_from_data(text, len(text.encode("utf-8")), GLib.KeyFileFlags.KEEP_TRANSLATIONS)
+                info = GioUnix.DesktopAppInfo.new_from_keyfile(keyfile)
                 if info:
                     actions = [{"id": action, "name": info.get_action_name(action),
                                 "exec": action_execs.get(action, "")}
@@ -504,6 +550,7 @@ def parse_desktop_files():
         except ValueError:
             pass
     apps.extend(e for e in cli_tools.cli_entries(known) if e["name"].strip().casefold() not in seen_names)
+    ENTRY_EXECS = entry_execs
     return sorted(apps, key=lambda app: app["name"].lower())
 
 
@@ -948,13 +995,14 @@ def app_process_name(app):
         args = shlex.split(app["exec"])
     except ValueError:
         return None
+    i = 0
     if args and Path(args[0]).name == "env":
-        args = args[1:]
-        while args and "=" in args[0] and not args[0].startswith("-"):
-            args = args[1:]
-    if not args:
+        i = 1
+        while i < len(args) and "=" in args[i] and not args[i].startswith("-"):
+            i += 1
+    if i >= len(args):
         return None
-    name = Path(args[0]).name.casefold()
+    name = Path(args[i]).name.casefold()
     # Shared interpreters/wrappers cannot identify an individual application.
     if name in {"sh", "bash", "env", "flatpak", "gtk-launch", "python", "python3", "java"}:
         return None
@@ -966,7 +1014,8 @@ def app_process_name(app):
 
 
 def process_pids(name):
-    """PIDs of the user's processes whose executable is called name."""
+    """PIDs of the user's processes whose executable is called name (only for
+    the running state; Quit uses quit_target and executable_processes)."""
     pids = set()
     for process in Path("/proc").glob("[0-9]*"):
         try:
@@ -977,23 +1026,172 @@ def process_pids(name):
     return pids
 
 
-def end_processes(name, pids):
-    """SIGTERM each of `pids` that is still this user's process called `name`. A
-    pidfd is opened first and the process checked after that, so a PID that was
-    reused meanwhile by another program gets nothing (the pidfd stays bound to
-    the process it was opened for). Returns how many were signalled."""
+# Programs that run other code (a script, a jar, a web app) or start other
+# programs: their executable says nothing about which app a process is, so Quit
+# never ends processes by them. Version suffixes count too (python3.14, node22).
+# Version-manager shims (mise, asdf, …) are symlinks to the manager itself.
+_SHARED_PROGRAM_RE = re.compile(
+    r"(?:python|pypy|perl|ruby|php|lua|luajit|node|nodejs|deno|bun|java|electron|wine|wine64|mono"
+    r"|dotnet|gjs|qmlscene|tclsh|wish|rscript|guile|racket|sbcl|erl|elixir|julia)[0-9._-]*"
+    r"|(?:ba|da|z|k|c|tc|mk|lk|a)?sh|fish|nu|xonsh|elvish|busybox|toybox|env|flatpak|snap|gtk-launch"
+    r"|gio|xdg-open|xdg-terminal-exec|uwsm|uwsm-app|app2unit|systemd-run|sudo|pkexec|doas|run0|nohup"
+    r"|setsid|stdbuf|nice|ionice|taskset|chrt|timeout|appimage-run|bwrap|firejail|distrobox|toolbox"
+    r"|nix|nix-shell|steam|exec|mise|asdf|volta|corepack|npx|npm|pnpm|yarn|uv|uvx|pipx", re.IGNORECASE)
+
+
+def _program_file(app):
+    """The canonical path of the executable an entry starts, or None."""
+    command = app.get("exec", "") if isinstance(app.get("exec"), str) else ""
+    program = exec_program(command)
+    if not program or "\0" in program:
+        return None
+    if "/" not in program:
+        if env_changes_path(command):
+            return None
+        program = shutil.which(program)
+        if not program:
+            return None
+    # Only absolute paths: a relative one (./foo, or a relative PATH entry)
+    # would be resolved against this process's folder, not the entry's Path=.
+    if not os.path.isabs(program):
+        return None
+    names = {Path(program).name.casefold()}
+    try:
+        path = os.path.realpath(program)
+        if not os.path.isabs(path) or not stat.S_ISREG(os.stat(path).st_mode) or not os.access(path, os.X_OK):
+            return None
+    except (OSError, ValueError):
+        return None
+    names.add(Path(path).name.casefold())
+    if any(_SHARED_PROGRAM_RE.fullmatch(n) or n in TERMINALS for n in names):
+        return None
+    return path
+
+
+def _resolve_word(word):
+    """The canonical file a word of an Exec line names as a program, or None."""
+    try:
+        if "/" not in word:
+            word = shutil.which(word) or ""
+        return os.path.realpath(word) if os.path.isabs(word) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _may_start(line, names, path, cache):
+    """Whether an Exec line may start the executable path (called one of
+    names), by any word of it: also after env options, inside sh -c '…' or
+    env -S '…', or as --opt=value; by name, or by another name that resolves
+    to path (a symlink alias). Errs towards yes; it only takes Quit away."""
+    if not isinstance(line, str):
+        return False
+    for piece in re.split(r"[\s=:;'\"`|&()<>]+", line):
+        if not piece:
+            continue
+        if Path(piece).name.casefold() in names:
+            return True
+        if piece not in cache:
+            cache[piece] = _resolve_word(piece)
+        if cache[piece] == path:
+            return True
+    return False
+
+
+def quit_target(app, apps=(), entry_execs=None):
+    """The canonical executable that identifies app's own processes, for
+    Quit, or None when the app cannot be told apart from other programs: it
+    runs through an interpreter or wrapper (python3.14 app.py, env, flatpak),
+    is a terminal itself, a web app of a browser, from a relative path, or
+    another entry may start the same executable (libreoffice --writer /
+    --calc): another listed app, or any desktop entry (or action of one)
+    the last scan read, hidden ones included (entry_execs, default
+    ENTRY_EXECS). That check goes by any word of the other Exec line that has
+    the program's name or resolves to the same file (a symlink alias), so
+    wrapper forms it cannot parse count as sharing."""
+    if app.get("pwa") or app.get("cli_command"):
+        return None
+    probe = app
+    if terminal_command(app):
+        # A command-line app in a terminal (xdg-terminal-exec -e claude) runs
+        # as its command: that command's executable is the target.
+        try:
+            args = shlex.split(app.get("exec", ""))
+        except ValueError:
+            return None
+        flag = next((f for f in ("-e", "--command", "--") if f in args), None)
+        rest = args[args.index(flag) + 1:] if flag else []
+        if not rest:
+            return None
+        probe = {"exec": shlex.join(rest)}
+    elif browser_web_app(app):
+        return None
+    path = _program_file(probe)
+    if path is None:
+        return None
+    names = {Path(path).name.casefold(), Path(exec_program(probe.get("exec", "")) or path).name.casefold()}
+    own_id, cache = app.get("desktop_id"), {}
+    for other in apps:
+        if other is app or (own_id and other.get("desktop_id") == own_id):
+            continue
+        if _may_start(other.get("exec"), names, path, cache):
+            return None
+    for desktop_id, line in ENTRY_EXECS if entry_execs is None else entry_execs:
+        if own_id and desktop_id == own_id:
+            continue
+        if _may_start(line, names, path, cache):
+            return None
+    return path
+
+
+def _process_start(pid):
+    """A process's start time in clock ticks since boot (field 22 of
+    /proc/PID/stat), which tells a process apart from a later one that got
+    the same PID."""
+    with open(f"/proc/{int(pid)}/stat", "rb") as handle:
+        data = handle.read(4096)
+    return int(data[data.rindex(b")") + 2:].split()[19])
+
+
+def _is_target(pid, path):
+    process = Path(f"/proc/{int(pid)}")
+    return process.stat().st_uid == os.getuid() and os.readlink(process / "exe") == path
+
+
+def executable_processes(path):
+    """{PID: start time} of the user's processes whose executable is exactly
+    path (/proc/PID/exe: the resolved file, not just its name; a binary
+    replaced since by an update reads "… (deleted)" and does not count)."""
+    found = {}
+    if not path:
+        return found
+    for process in Path("/proc").glob("[0-9]*"):
+        try:
+            pid = int(process.name)
+            if _is_target(pid, path):
+                found[pid] = _process_start(pid)
+        except (OSError, ValueError, IndexError):
+            continue
+    return found
+
+
+def end_processes(path, targets):
+    """SIGTERM each process of targets ({PID: start time}, from
+    executable_processes) that still is this user's process of executable
+    path with the same start time. A pidfd is opened first and the process
+    checked after that, so a PID reused meanwhile by another program gets
+    nothing (the pidfd stays bound to the process it was opened for).
+    Returns how many were signalled."""
     ended = 0
-    for pid in pids:
+    for pid, start in dict(targets).items():
         try:
             fd = os.pidfd_open(pid)
-        except (OSError, AttributeError):
+        except (OSError, AttributeError, TypeError, ValueError):
             continue
         try:
-            process = Path(f"/proc/{pid}")
-            if process.stat().st_uid == os.getuid() and Path(os.readlink(process / "exe")).name.casefold() == name:
+            if _is_target(pid, path) and _process_start(pid) == start:
                 signal.pidfd_send_signal(fd, signal.SIGTERM)
                 ended += 1
-        except (OSError, ValueError):
+        except (OSError, ValueError, IndexError):
             pass
         finally:
             os.close(fd)

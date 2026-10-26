@@ -27,7 +27,8 @@ import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 from launcher_core import (  # noqa: E402
-    TERMINALS, app_process_name, background_process_names, process_pids, end_processes, terminal_command,
+    TERMINALS, app_process_name, background_process_names, process_pids, end_processes, executable_processes,
+    quit_target, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
     saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown, filter_field_shown,
@@ -4906,16 +4907,17 @@ class Launcher(Adw.Application):
         """How to quit a running app, or None: end its processes (SIGTERM,
         which apps take as a request to quit and save). Not for terminals:
         their process is shared."""
-        name = terminal_command(app) or app_process_name(app)
-        if not name or name in TERMINALS:
-            return None
-        pids = process_pids(name)
-        if not pids:
+        # Only processes of the app's own executable (its canonical path), never
+        # those of a shared interpreter or of a binary that only has the same name.
+        target = quit_target(app, self.apps)
+        targets = executable_processes(target) if target else {}
+        if not targets:
             return None
 
         def end():
-            # The menu may have stayed open a while: only processes that still are this app.
-            end_processes(name, pids)
+            # The menu may have stayed open a while: only processes that still are
+            # the ones found above (same PID, executable and start time).
+            end_processes(target, targets)
             GLib.timeout_add(800, self.refresh_after_close)
         return end
 
