@@ -343,13 +343,23 @@ def app_launch_argv(app):
 
 def shortcut_command(launch, action=""):
     """The command line GNOME runs for a shortcut (split by GLib, no shell):
-    `gio launch` for a desktop file, the launch helper for one of its
-    actions, the argv itself otherwise."""
+    the launch helper for a desktop file or one of its actions (it reads the
+    file bounded and without blocking), the argv itself otherwise."""
     if len(launch) == 1 and launch[0].endswith(".desktop"):
-        if action:
-            return shlex.join([sys.executable, str(LAUNCH_HELPER), launch[0], action])
-        return shlex.join(["gio", "launch", launch[0]])
+        return shlex.join([sys.executable, str(LAUNCH_HELPER), launch[0], *([action] if action else [])])
     return shlex.join(launch)
+
+
+def outdated_commands(settings=None) -> bool:
+    """Our own shortcuts still written as `gio launch <file>` (older versions):
+    they are written again with the launch helper."""
+    settings = settings or backend()
+    for path in settings.custom_paths():
+        if path.startswith(CUSTOM_BASE) and path[len(CUSTOM_BASE):].startswith(OWN_PREFIX):
+            command = settings.read_custom(path).get("command", "")
+            if command.startswith("gio launch "):
+                return True
+    return False
 
 
 def app_key(app):

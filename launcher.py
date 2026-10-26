@@ -2143,7 +2143,11 @@ class Launcher(Adw.Application):
         state = copy.deepcopy(self.shortcut_state)
         removed = shortcuts.prune_missing(state)
         names = []
-        if removed:
+        try:
+            outdated = shortcuts.outdated_commands()     # `gio launch` from before: the bounded helper now
+        except Exception:
+            outdated = False
+        if removed or outdated:
             try:
                 shortcuts.save_and_apply(state)
             except (RuntimeError, OSError) as error:

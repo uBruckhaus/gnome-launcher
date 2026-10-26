@@ -166,7 +166,7 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(settings.paths[0], BASE + "custom0/")
         self.assertEqual(len(own), 2)
         written = {settings.custom[p]["binding"]: settings.custom[p] for p in own}
-        self.assertEqual(written["<Super><Shift>f"]["command"], "gio launch /a/firefox.desktop")
+        self.assertTrue(written["<Super><Shift>f"]["command"].endswith("launch_entry.py /a/firefox.desktop"))
         self.assertIn("launch_entry.py /a/firefox.desktop new-private-window", written["<Super><Shift>p"]["command"])
         self.assertEqual(written["<Super><Shift>p"]["name"], "Firefox: New Private Window")
         # Removing every shortcut removes the launcher's keybindings, not the user's.
@@ -230,8 +230,8 @@ class ApplyTests(unittest.TestCase):
 
 class CommandTests(unittest.TestCase):
     def test_commands_glib_can_split(self):
-        self.assertEqual(shortcuts.shortcut_command(["/usr/share/applications/My App.desktop"]),
-                         "gio launch '/usr/share/applications/My App.desktop'")
+        self.assertTrue(shortcuts.shortcut_command(["/usr/share/applications/My App.desktop"]).endswith(
+            "launch_entry.py '/usr/share/applications/My App.desktop'"))
         self.assertEqual(shortcuts.shortcut_command(["/home/u/AppImages/x.AppImage", "--flag"]),
                          "/home/u/AppImages/x.AppImage --flag")
 
@@ -267,6 +267,31 @@ class RealSchemaTests(unittest.TestCase):
             env = {**os.environ, "GSETTINGS_BACKEND": "memory"}
             result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=30)
             self.assertEqual(result.stdout.strip(), "ok", result.stderr)
+
+
+
+class OutdatedCommandTests(unittest.TestCase):
+    def test_old_gio_launch_shortcuts_are_found(self):
+        old = FakeSettings(custom={BASE + "gnome-launcher-0/": {"binding": "<Super>x", "command": "gio launch /a.desktop",
+                                                                 "name": "A"}})
+        self.assertTrue(shortcuts.outdated_commands(old))
+        user = FakeSettings(custom={BASE + "custom0/": {"binding": "<Super>y", "command": "gio launch /b.desktop",
+                                                        "name": "mine"}})
+        self.assertFalse(shortcuts.outdated_commands(user))      # the user's own shortcuts are left alone
+
+
+class LaunchEntryTests(unittest.TestCase):
+    def test_plain_start_reads_bounded_and_never_blocks_on_a_fifo(self):
+        import os
+        import tempfile
+        import time
+        import launch_entry
+        with tempfile.TemporaryDirectory() as folder:
+            fifo = os.path.join(folder, "x.desktop")
+            os.mkfifo(fifo)
+            started = time.monotonic()
+            self.assertEqual(launch_entry.main(["launch_entry.py", fifo]), 1)
+            self.assertLess(time.monotonic() - started, 1.0)
 
 
 if __name__ == "__main__":
