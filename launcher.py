@@ -27,8 +27,7 @@ import shutil  # noqa: E402
 import tempfile  # noqa: E402
 import threading  # noqa: E402
 from launcher_core import (  # noqa: E402
-    TERMINALS, app_process_name, background_process_names, process_pids, end_processes, executable_processes,
-    quit_target, terminal_command,
+    TERMINALS, app_process_name, background_process_names, process_pids, terminal_command,
     DESKTOP_DIRS, HIDDEN_FILE, get_appimage_directories,
     admin_action_enabled, admin_command, running_first_enabled, set_running_first, saved_view, set_view,
     saved_wide_layout, set_wide_layout, view_buttons_shown, set_view_buttons_shown, filter_field_shown,
@@ -2294,13 +2293,6 @@ class Launcher(Adw.Application):
                 self.open_shortcut_page(row.app)
             return True
 
-        if key == Gdk.KEY_Delete:
-            row = self.selected_item()
-            quit_app = self.quit_action(row.app) if row is not None and hasattr(row, "app") else None
-            if quit_app is not None:
-                quit_app()
-            return True
-
         if key == Gdk.KEY_BackSpace:
             if self.search_query:
                 self.search_query = self.search_query[:-1]
@@ -2908,9 +2900,6 @@ class Launcher(Adw.Application):
         add_action(_("Unhide from list") if hidden else _("Hide from list"),
                    lambda: self.set_hidden(app, not hidden),
                    "view-reveal-symbolic" if hidden else "view-conceal-symbolic")
-        quit_app = self.quit_action(app) if self.app_state(app) != "stopped" else None
-        if quit_app:
-            add_action(_("Quit"), quit_app, "application-exit-symbolic", is_destructive=True)
         if details.uninstall_plan(app, look_up_package=False) is not None:
             add_separator()
             add_action(_("Uninstall…"), lambda: self.confirm_uninstall(app), "user-trash-symbolic",
@@ -4902,24 +4891,6 @@ class Launcher(Adw.Application):
         self.show_hidden = not self.show_hidden
         self.update_hidden_button_state()
         self.refresh_list()
-
-    def quit_action(self, app):
-        """How to quit a running app, or None: end its processes (SIGTERM,
-        which apps take as a request to quit and save). Not for terminals:
-        their process is shared."""
-        # Only processes of the app's own executable (its canonical path), never
-        # those of a shared interpreter or of a binary that only has the same name.
-        target = quit_target(app, self.apps)
-        targets = executable_processes(target) if target else {}
-        if not targets:
-            return None
-
-        def end():
-            # The menu may have stayed open a while: only processes that still are
-            # the ones found above (same PID, executable and start time).
-            end_processes(target, targets)
-            GLib.timeout_add(800, self.refresh_after_close)
-        return end
 
     def check_updates(self):
         """Look for package and Flatpak updates in the background, at most every

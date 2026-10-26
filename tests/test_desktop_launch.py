@@ -39,7 +39,7 @@ class DesktopLaunchTests(unittest.TestCase):
                         Mock(launch_uris=Mock(side_effect=RuntimeError("rejected")))]:
             with self.subTest(outcome=outcome), \
                     patch.object(launcher_core.subprocess, "Popen") as spawn, \
-                    patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=outcome):
+                    patch.object(launcher_core, "desktop_app_info", return_value=outcome):
                 self.assertFalse(launcher_core.launch_app(app))
                 spawn.assert_not_called()
 
@@ -47,7 +47,7 @@ class DesktopLaunchTests(unittest.TestCase):
         app = {"desktop_path": "/tmp/example.desktop", "exec": "unused"}
         info = Mock(launch_uris=Mock(return_value=True))
         context = object()
-        with patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=info), \
+        with patch.object(launcher_core, "desktop_app_info", return_value=info), \
                 patch.object(launcher_core.subprocess, "Popen") as spawn:
             self.assertTrue(launcher_core.launch_app(app, context))
             info.launch_uris.assert_called_once_with([], context)
@@ -57,7 +57,7 @@ class DesktopLaunchTests(unittest.TestCase):
         app = {"desktop_path": "/tmp/example.desktop"}
         info = Mock(list_actions=Mock(return_value=["new-window"]))
         context = object()
-        with patch.object(launcher_core.GioUnix.DesktopAppInfo, "new_from_filename", return_value=info):
+        with patch.object(launcher_core, "desktop_app_info", return_value=info):
             self.assertTrue(launcher_core.launch_action(app, "new-window", context))
             info.launch_action.assert_called_once_with("new-window", context)
             self.assertFalse(launcher_core.launch_action(app, "missing", context))

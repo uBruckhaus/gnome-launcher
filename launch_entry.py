@@ -4,17 +4,15 @@ Launcher shortcut for an app's action runs, since `gio launch` opens only
 the app itself. Usage: launch_entry.py /path/app.desktop action-id"""
 import sys
 
-import gi
-
-gi.require_version("GioUnix", "2.0")
-from gi.repository import GioUnix  # noqa: E402
+import launcher_core  # noqa: E402  (next to this script)
 
 
 def main(argv):
     if len(argv) != 3 or not argv[1].endswith(".desktop"):
         print(__doc__.strip().splitlines()[-1], file=sys.stderr)
         return 2
-    info = GioUnix.DesktopAppInfo.new_from_filename(argv[1])
+    # Bounded, non-blocking read: a FIFO or a huge file cannot stall the shortcut.
+    info = launcher_core.desktop_app_info(argv[1])
     if info is None or argv[2] not in info.list_actions():
         print(f"No action {argv[2]!r} in {argv[1]}", file=sys.stderr)
         return 1
