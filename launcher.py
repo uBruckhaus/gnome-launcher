@@ -56,6 +56,7 @@ MIN_LIST_HEIGHT = 300
 # overview: cards in columns, filtered by group in a bar at the bottom.
 TILE_WIDTH = 196       # A card's narrowest width.
 TILE_SPACING = 10
+TILE_TEXT_HEIGHT = 84  # A card's height beside its icon: name, two lines of description, footer.
 MAX_COLUMNS = 6
 DRAG_PREFIX = "gnome-launcher-entry:"  # A card dragged onto a group chip.
 DRAG_GROUP_PREFIX = "gnome-launcher-group:"  # A group dragged to a new place.
@@ -116,6 +117,12 @@ def folder_fit(count, card_width, height):
     if best_icon < FOLDER_ICON:
         return folder_columns(card_width), FOLDER_ICON
     return best_columns, min(best_icon, FOLDER_ICON_MAX)
+
+
+def folder_app_icon(fitted, app_icon_size):
+    """A folder icon's drawn size: the fitted size at the default App icon
+    size, smaller ones shrink it; it never grows past its cell."""
+    return min(fitted, max(16, round(fitted * app_icon_size / DEFAULT_APP_ICON_SIZE)))
 
 
 def folder_icons_height(count, columns, icon, height):
@@ -994,7 +1001,7 @@ class Launcher(Adw.Application):
                 note = self.update_note(app)
                 hidden = app["desktop_id"] in self.hidden
                 slot = Gtk.Overlay()
-                icon = self.app_icon(app, icon_size)
+                icon = self.app_icon(app, folder_app_icon(icon_size, self.app_icon_px))
                 slot.set_child(icon)
                 if note:
                     # A small mark on the icon, like the run dot on the cards.
@@ -1244,6 +1251,7 @@ class Launcher(Adw.Application):
         if is_hidden:
             tile.add_css_class("launcher-row-hidden")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_size_request(-1, self.app_icon_px + TILE_TEXT_HEIGHT)  # Follows Settings › App icon size.
         top = Gtk.Box(spacing=6)
         icon = self.app_icon(app, self.app_icon_px)
         if is_hidden:
@@ -1831,7 +1839,7 @@ class Launcher(Adw.Application):
         .launcher-grid flowboxchild.launcher-tile {{
             background: alpha({colors['foreground']}, 0.045);
             border: 1px solid alpha({colors['foreground']}, 0.10);
-            border-radius: {radius}px; padding: 10px 10px 8px 12px; min-height: 128px;
+            border-radius: {radius}px; padding: 10px 10px 8px 12px;
         }}
         .launcher-grid flowboxchild.launcher-tile:hover {{ border-color: alpha({colors['accent']}, 0.55); }}
         .launcher-grid flowboxchild.launcher-tile:selected {{
@@ -3433,7 +3441,7 @@ class Launcher(Adw.Application):
         corners_dropdown.set_selected(self.corner_choices.index(saved_corners()))
         corners_dropdown.connect("notify::selected", lambda d, _p: getattr(self, "corners_syncing", False)
                                  or self.set_corners(self.corner_choices[d.get_selected()]))
-        icon_tip = _("How large the app icons are on the cards; the list's are a little smaller. Like the dock's Icon size.")
+        icon_tip = _("How large the app icons are on the cards (the cards grow with them); the list's are a little smaller. In folders, 44 px fills the page and smaller sizes shrink the icons.")
         icon_dropdown = Gtk.DropDown.new_from_strings([f"{v} px" for v in APP_ICON_SIZES])
         icon_dropdown.add_css_class("launcher-compact-dropdown")
         icon_dropdown.set_halign(Gtk.Align.START)

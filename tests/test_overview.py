@@ -12,7 +12,7 @@ import launcher_core  # noqa: E402
 NAMES = {"CARD_WIDTH", "TILE_WIDTH", "TILE_MAX_WIDTH", "TILE_SPACING", "MAX_COLUMNS", "CARD_PADDING",
          "MAX_CARD_WIDTH", "grid_columns", "FOLDER_COLUMNS", "FOLDER_ROWS", "FOLDER_ICON",
          "FOLDER_ICON_MAX", "FOLDER_CELL", "FOLDER_NAME_HEIGHT", "FOLDER_TILE_WIDTH", "folder_columns",
-         "folder_tile_size", "folder_fit", "folder_icons_height"}
+         "folder_tile_size", "folder_fit", "folder_icons_height", "folder_app_icon"}
 
 
 def load():
@@ -21,7 +21,7 @@ def load():
             if (isinstance(n, ast.Assign) and n.targets[0].id in NAMES if isinstance(n, ast.Assign)
                 and isinstance(n.targets[0], ast.Name) else False)
             or (isinstance(n, ast.FunctionDef) and n.name in NAMES)]
-    namespace = {}
+    namespace = {"DEFAULT_APP_ICON_SIZE": launcher_core.DEFAULT_APP_ICON_SIZE}
     exec(compile(ast.Module(body=body, type_ignores=[]), "launcher.py", "exec"), namespace)
     return namespace
 
@@ -64,6 +64,12 @@ class FolderFitTests(unittest.TestCase):
         ns = load()
         self.assertEqual(ns["folder_fit"](40, 600, 400), (ns["folder_columns"](600), ns["FOLDER_ICON"]))
         self.assertEqual(ns["folder_fit"](0, 600, 400)[1], ns["FOLDER_ICON"])
+
+    def test_app_icon_size_scales_the_fitted_folder_icons(self):
+        ns = load()
+        self.assertEqual(ns["folder_app_icon"](60, 44), 60)   # The default: the fitted size.
+        self.assertEqual(ns["folder_app_icon"](60, 32), 44)   # Smaller sizes shrink them.
+        self.assertEqual(ns["folder_app_icon"](60, 64), 60)   # Never past the cell.
 
 
 class OverviewTests(unittest.TestCase):
