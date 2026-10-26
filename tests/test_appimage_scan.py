@@ -93,12 +93,28 @@ class AppImageScanTests(unittest.TestCase):
     def test_env_options_before_the_program(self):
         self.assertEqual(launcher_core.exec_program("/usr/bin/env -u PYTHONPATH /home/u/Tool.AppImage"),
                          "/home/u/Tool.AppImage")
-        self.assertEqual(launcher_core.exec_program("env --unset=A -C /tmp -- B=1 foo --x"), "foo")
+        self.assertEqual(launcher_core.exec_program("env --unset=A -- B=1 foo --x"), "foo")
         self.assertEqual(launcher_core.exec_program("env -i A=1 foo"), "foo")
         # Forms it does not know: no program, but the entry is not rejected for it.
         self.assertIsNone(launcher_core.exec_program("env -S 'foo bar'"))
         self.assertTrue(launcher_core.executable_exists("/usr/bin/env -S 'sh -c true'"))
         self.assertTrue(launcher_core.executable_exists("/usr/bin/env -u PYTHONPATH sh -c true"))
+
+    def test_env_chdir_checks_env_itself(self):
+        # The program would be found relative to DIR: env is checked instead, the entry stays.
+        for command in ("/usr/bin/env -C /tmp ./prog", "env --chdir=/tmp ./prog", "env --chdir /tmp prog"):
+            self.assertIsNone(launcher_core.exec_program(command), command)
+            self.assertTrue(launcher_core.executable_exists(command), command)
+
+    def test_nul_in_exec_path_is_not_runnable_and_does_not_stop_the_scan(self):
+        self.assertFalse(launcher_core.executable_exists("/opt/tool\0x --run"))
+        self.assertFalse(launcher_core.executable_exists("/usr/bin/env /opt/tool\0x"))
+        self.assertFalse(launcher_core.executable_exists("tool\0x"))
+
+    def test_hyphenated_build_metadata_is_ignored(self):
+        self.assertEqual([a["desktop_id"] for a in self.scan(["Tool-1.0+build-999.AppImage", "Tool-1.0.1.AppImage"])],
+                         ["Tool-1.0.1"])
+        self.assertEqual(launcher_core._version_key("Tool-1.0+build-999"), launcher_core._version_key("Tool-1.0"))
 
     def test_cpu_names_only_as_their_own_word(self):
         self.assertEqual(launcher_core.appimage_base_name("Superarm64-1.0"), "Superarm64")

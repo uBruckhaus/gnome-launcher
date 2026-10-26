@@ -332,9 +332,11 @@ def browser_web_app(app):
     return WEB_APP_BROWSERS.get(Path(argv[0]).name, _("the browser"))
 
 
-# env's options: those without a value, and those that take the next word.
+# env's options: those without a value, and those that take the next word. -C/--chdir
+# is not among them: its program would be found relative to another folder, so env
+# itself is checked, as for -S.
 _ENV_FLAGS = {"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}
-_ENV_WITH_VALUE = {"-u", "--unset", "-C", "--chdir"}
+_ENV_WITH_VALUE = {"-u", "--unset"}
 _ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
 
 
@@ -350,7 +352,7 @@ def exec_program(command):
         parts = parts[1:]
         while parts:
             word = parts[0]
-            if word in _ENV_FLAGS or word.startswith(("--unset=", "--chdir=")) or _ENV_ASSIGNMENT.fullmatch(word):
+            if word in _ENV_FLAGS or word.startswith("--unset=") or _ENV_ASSIGNMENT.fullmatch(word):
                 parts = parts[1:]
             elif word in _ENV_WITH_VALUE:
                 parts = parts[2:]
@@ -378,6 +380,8 @@ def executable_exists(command):
         if not parts or Path(parts[0]).name != "env" or len(parts) < 2:
             return False
         program = parts[0]
+    if "\0" in program:
+        return False  # os.access and shutil.which raise on a NUL; such an entry cannot run
     return os.access(program, os.X_OK) if "/" in program else shutil.which(program) is not None
 
 
@@ -753,8 +757,14 @@ def _version_key(stem):
     release numbers, then final above prerelease (1.0 > 1.0rc2 > 1.0rc1);
     build metadata (+build5) does not count."""
     release, pre = [], None
+    words = []
     for word in _appimage_words(stem)[1]:
-        word = word.split("+", 1)[0]
+        # Build metadata runs from the first "+" to the end, hyphens included (1.0+build-999).
+        word, plus, _ = word.partition("+")
+        words.append(word)
+        if plus:
+            break
+    for word in words:
         tag = _PRERELEASE.fullmatch(word)
         if tag:
             pre = pre or (_STAGES[tag.group(1).casefold()], int(tag.group(2) or 0))
