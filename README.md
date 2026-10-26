@@ -53,7 +53,7 @@ then **its own menu › Shortcut…**.
   tray Quit entry to click instead. Close an app from its own window or menu.
 - Desktop entries are read only when they are regular files of at most
   256 KiB, opened without blocking, for the app list as well as for starting
-  an app or one of its actions (also from a shortcut), so a FIFO or a huge
+  an app or one of its actions, so a FIFO or a huge
   file in an applications folder can neither freeze nor exhaust the launcher.
 - **Details…:** type, origin, default-app roles, desktop file, program,
   package, version, size, install date and website, with copy buttons.
