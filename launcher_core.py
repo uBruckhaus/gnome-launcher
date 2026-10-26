@@ -414,7 +414,14 @@ def parse_desktop_files():
                          "categories": [c for c in values.get("Categories", "").split(";") if c][:20],
                          "desktop_id": path.stem, "startup_class": values.get("StartupWMClass", "")})
 
-    apps.extend(scan_standalone_appimages(seen_names))
+    # An AppImage a .desktop file already starts (an installer wrote one) is that app.
+    started = set()
+    for app in apps:
+        try:
+            started.update(arg for arg in shlex.split(app.get("exec", "")) if arg.endswith((".AppImage", ".appimage")))
+        except ValueError:
+            pass
+    apps.extend(scan_standalone_appimages(seen_names, started))
     # CLI agents installed with mise (Codex, Copilot, …) that no .desktop file opens.
     known = set()
     for app in apps:
@@ -666,68 +673,107 @@ def cache_appimage_icon(path, raw_icon, cache_dir):
     return ""
 
 
-def scan_standalone_appimages(seen_names):
+# File name words that are not part of an app's name: version, system, CPU.
+_APPIMAGE_NOISE = {"linux", "gnu", "appimage", "x86", "x64", "x86-64", "amd64", "i386", "i686",
+                   "aarch64", "arm64", "armhf", "armv7l", "universal", "portable"}
+
+
+def appimage_base_name(stem):
+    """The app's name in an AppImage file name: "photocraft-0.14.0-linux-x86_64"
+    → "photocraft", "Asterism-0.7.0-x86_64" → "Asterism"."""
+    words = [w for w in re.split(r"[-_ ]+", stem) if w]
+    kept = [w for i, w in enumerate(words)
+            if not (i and (w.casefold() in _APPIMAGE_NOISE or re.fullmatch(r"v?\d[\w.+]*", w, re.IGNORECASE)))]
+    return " ".join(kept) or stem
+
+
+def _name_key(name):
+    return re.sub(r"[-_ ]", "", name.strip().casefold())
+
+
+def _version(word):
+    """A version word's numbers ("v2.0" → (2, 0)), or None for any other word."""
+    if not re.fullmatch(r"v?\d[\w.+]*", word, re.IGNORECASE):
+        return None
+    return tuple(int(n) for n in re.findall(r"\d+", word))
+
+
+def _newest_first(path):
+    """Sort key: one app's versions together, the newest first (0.14.0 before 0.9.0, v2.0 before 1.0)."""
+    # CPU names hold digits too (x86_64): not part of the version.
+    stem = re.sub(r"x86[-_]64|aarch64|arm64|amd64|armv7l|i[36]86", "", path.stem, flags=re.IGNORECASE)
+    words = [w for w in re.split(r"[-_ ]+", stem) if w]
+    numbers = [v for w in words[1:] if (v := _version(w)) is not None]
+    # Negated, with an end mark after them: 1.0.1 (−1, 0, −1, 1) comes before 1.0 (−1, 0, 1).
+    return (_name_key(appimage_base_name(path.stem)), [-n for v in numbers for n in v] + [1], path.name)
+
+
+def scan_standalone_appimages(seen_names, started=()):
     apps = []
     icon_cache_dir = Path.home() / ".cache/gnome-launcher/icons"
     has_7z = shutil.which("7z") is not None
+    started = {str(Path(p)) for p in started}
+    # A .desktop file starting one version of an app stands for its other versions too.
+    taken = {_name_key(appimage_base_name(Path(p).stem)) for p in started}
 
-    for directory in get_appimage_directories():
-        for path in directory.glob("*.[aA][pP][pP][iI][mM][aA][gG][eE]"):
-            # Discovery must respect user permissions, never make files executable.
-            if not path.is_file() or not os.access(path, os.X_OK):
-                continue
+    # All folders at once: a newer version in another folder still wins.
+    found = [path for directory in get_appimage_directories()
+             for path in directory.glob("*.[aA][pP][pP][iI][mM][aA][gG][eE]")]
+    for path in sorted(found, key=_newest_first):
+        # Discovery must respect user permissions, never make files executable.
+        if not path.is_file() or not os.access(path, os.X_OK):
+            continue
+        if str(path) in started or _name_key(appimage_base_name(path.stem)) in taken:
+            continue
 
-            app_name = ""
-            app_desc = ""
-            icon_path = ""
-            startup_class = ""
-            raw_icon = ""
+        app_name = ""
+        app_desc = ""
+        icon_path = ""
+        startup_class = ""
+        raw_icon = ""
 
-            if has_7z:
-                try:
-                    desktop_text = read_bounded_output(
-                        ["7z", "e", "-so", str(path), "*.desktop"])
-                    if desktop_text and "[Desktop Entry]" in desktop_text:
-                        for line in desktop_text.splitlines():
-                            if line.startswith("Name=") and not app_name:
-                                app_name = line.split("=", 1)[1].strip()
-                            elif line.startswith("Comment=") and not app_desc:
-                                app_desc = line.split("=", 1)[1].strip()
-                            elif line.startswith("StartupWMClass="):
-                                startup_class = line.split("=", 1)[1].strip()
-                            elif line.startswith("Icon=") and not raw_icon:
-                                raw_icon = line.split("=", 1)[1].strip()
-                        if raw_icon:
-                            icon_path = cache_appimage_icon(path, raw_icon, icon_cache_dir)
-                except Exception:
-                    pass
+        if has_7z:
+            try:
+                desktop_text = read_bounded_output(
+                    ["7z", "e", "-so", str(path), "*.desktop"])
+                if desktop_text and "[Desktop Entry]" in desktop_text:
+                    for line in desktop_text.splitlines():
+                        if line.startswith("Name=") and not app_name:
+                            app_name = line.split("=", 1)[1].strip()
+                        elif line.startswith("Comment=") and not app_desc:
+                            app_desc = line.split("=", 1)[1].strip()
+                        elif line.startswith("StartupWMClass="):
+                            startup_class = line.split("=", 1)[1].strip()
+                        elif line.startswith("Icon=") and not raw_icon:
+                            raw_icon = line.split("=", 1)[1].strip()
+                    if raw_icon:
+                        icon_path = cache_appimage_icon(path, raw_icon, icon_cache_dir)
+            except Exception:
+                pass
 
-            if not app_name:
-                clean_name = path.stem
-                clean_name = re.sub(r"[-_](?:v?\d+[\d\.\-+_]*)(?:[-_]x86_64|[-_]x64|[-_]amd64)?", "", clean_name, flags=re.IGNORECASE)
-                clean_name = clean_name.replace("-", " ").replace("_", " ").strip()
-                app_name = clean_name or path.stem
+        if not app_name:
+            app_name = appimage_base_name(path.stem)
 
-            name_key = app_name.strip().casefold()
-            # If the app name is already present from a desktop file, skip
-            if name_key in seen_names:
-                continue
-            normalized = name_key.replace("-", "").replace(" ", "")
-            if any(normalized == s.replace("-", "").replace(" ", "") for s in seen_names):
-                continue
+        name_key = app_name.strip().casefold()
+        # If the app name is already present from a desktop file, skip
+        if name_key in seen_names:
+            continue
+        normalized = _name_key(name_key)
+        if any(normalized == _name_key(s) for s in seen_names):
+            continue
 
-            seen_names.add(name_key)
-            apps.append({
-                "name": app_name,
-                "exec": shlex.join([str(path)]),
-                "argv": [str(path)],
-                "icon": icon_path or "application-x-executable",
-                "desktop_path": "",
-                "actions": [],
-                "description": app_desc or "",
-                "desktop_id": path.stem,
-                "startup_class": startup_class or path.stem,
-            })
+        seen_names.add(name_key)
+        apps.append({
+            "name": app_name,
+            "exec": shlex.join([str(path)]),
+            "argv": [str(path)],
+            "icon": icon_path or "application-x-executable",
+            "desktop_path": "",
+            "actions": [],
+            "description": app_desc or "",
+            "desktop_id": path.stem,
+            "startup_class": startup_class or path.stem,
+        })
     return apps
 
 
