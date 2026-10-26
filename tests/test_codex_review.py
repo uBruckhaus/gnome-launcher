@@ -143,5 +143,19 @@ class AppIconSizeTests(unittest.TestCase):
                 self.assertEqual(launcher_core.saved_app_icon_size(path), launcher_core.DEFAULT_APP_ICON_SIZE)
 
 
+class DesktopFileLocationTest(unittest.TestCase):
+    """%k keeps the desktop file's location although the info is built from a bounded read."""
+
+    def test_k_is_the_quoted_path(self):
+        from gi.repository import GLib
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, 'my "app" $x 5%.desktop')
+            Path(path).write_text("[Desktop Entry]\nType=Application\nName=T\nExec=true --file %k --literal %%k\n")
+            line = launcher_core.desktop_app_info(path).get_commandline()
+            ok, argv = GLib.shell_parse_argv(line.replace("%%", "%"))
+            self.assertEqual(argv[2], path)
+            self.assertEqual(argv[-1], "%k")
+
+
 if __name__ == "__main__":
     unittest.main()

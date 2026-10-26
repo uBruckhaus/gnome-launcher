@@ -455,10 +455,33 @@ def read_desktop_file(path, cap=MAX_DESKTOP_FILE_BYTES):
     return data.decode("utf-8", errors="ignore")
 
 
-def desktop_app_info_from_text(text):
-    """A Gio DesktopAppInfo built from a desktop entry's text, or None."""
+def _exec_quoted(path):
+    """A path as one argument of an Exec line (the desktop entry spec's quoting;
+    a % doubled, so it is never read as a field code)."""
+    text = str(path).replace("\\", "\\\\")
+    for char in ('"', "`", "$"):
+        text = text.replace(char, "\\" + char)
+    return '"' + text.replace("%", "%%") + '"'
+
+
+def desktop_app_info_from_text(text, path=None):
+    """A Gio DesktopAppInfo built from a desktop entry's text, or None. Built
+    from data, the info knows no file name: %k (the desktop file's location)
+    in Exec lines is filled in here from `path`, as Gio would."""
     keyfile = GLib.KeyFile()
     keyfile.load_from_data(text, len(text.encode("utf-8")), GLib.KeyFileFlags.KEEP_TRANSLATIONS)
+    if path is not None:
+        location = _exec_quoted(path)
+        for group in keyfile.get_groups()[0]:
+            if group != "Desktop Entry" and not group.startswith("Desktop Action "):
+                continue
+            try:
+                line = keyfile.get_string(group, "Exec")
+            except GLib.Error:
+                continue
+            filled = re.sub(r"%(.)", lambda m: location if m.group(1) == "k" else m.group(0), line)
+            if filled != line:
+                keyfile.set_string(group, "Exec", filled)
     return GioUnix.DesktopAppInfo.new_from_keyfile(keyfile)
 
 
@@ -470,7 +493,7 @@ def desktop_app_info(path):
     if text is None:
         return None
     try:
-        return desktop_app_info_from_text(text)
+        return desktop_app_info_from_text(text, path)
     except Exception:
         return None
 
@@ -522,7 +545,7 @@ def parse_desktop_files():
             actions = []
             try:
                 # From the bytes read above: the file is not opened a second time.
-                info = desktop_app_info_from_text(text)
+                info = desktop_app_info_from_text(text, path)
                 if info:
                     actions = [{"id": action, "name": info.get_action_name(action),
                                 "exec": action_execs.get(action, "")}
