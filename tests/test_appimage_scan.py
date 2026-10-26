@@ -84,6 +84,29 @@ class AppImageScanTests(unittest.TestCase):
         self.assertFalse(launcher_core.executable_exists("/usr/bin/env X=1 /nonexistent/Tool.AppImage"))
         self.assertTrue(launcher_core.executable_exists("/usr/bin/env X=1 sh -c true"))
 
+    def test_prerelease_stage_counts_before_its_number(self):
+        for names, newest in ((["Tool-1.0-beta9.AppImage", "Tool-1.0-rc1.AppImage"], "Tool-1.0-rc1"),
+                              (["Tool-1.0-rc1.AppImage", "Tool-1.0-beta1.AppImage"], "Tool-1.0-rc1"),
+                              (["Tool-1.0-alpha5.AppImage", "Tool-1.0-beta1.AppImage"], "Tool-1.0-beta1")):
+            self.assertEqual([a["desktop_id"] for a in self.scan(names)], [newest], names)
+
+    def test_env_options_before_the_program(self):
+        self.assertEqual(launcher_core.exec_program("/usr/bin/env -u PYTHONPATH /home/u/Tool.AppImage"),
+                         "/home/u/Tool.AppImage")
+        self.assertEqual(launcher_core.exec_program("env --unset=A -C /tmp -- B=1 foo --x"), "foo")
+        self.assertEqual(launcher_core.exec_program("env -i A=1 foo"), "foo")
+        # Forms it does not know: no program, but the entry is not rejected for it.
+        self.assertIsNone(launcher_core.exec_program("env -S 'foo bar'"))
+        self.assertTrue(launcher_core.executable_exists("/usr/bin/env -S 'sh -c true'"))
+        self.assertTrue(launcher_core.executable_exists("/usr/bin/env -u PYTHONPATH sh -c true"))
+
+    def test_cpu_names_only_as_their_own_word(self):
+        self.assertEqual(launcher_core.appimage_base_name("Superarm64-1.0"), "Superarm64")
+        self.assertEqual(launcher_core.appimage_base_name("Super-arm64"), "Super")
+        self.assertEqual(launcher_core.appimage_base_name("Tool_x86_64"), "Tool")
+        apps = self.scan(["Superarm64-1.0.AppImage", "Super-2.0.AppImage"])
+        self.assertEqual(sorted(a["name"] for a in apps), ["Super", "Superarm64"])
+
     def test_digit_words_in_the_name_stay(self):
         self.assertEqual(launcher_core.appimage_base_name("Foo-3D-1.0"), "Foo 3D")
         self.assertEqual(launcher_core.appimage_base_name("Tool-1.0-rc1-x86_64"), "Tool")

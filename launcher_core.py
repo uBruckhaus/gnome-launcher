@@ -332,25 +332,52 @@ def browser_web_app(app):
     return WEB_APP_BROWSERS.get(Path(argv[0]).name, _("the browser"))
 
 
+# env's options: those without a value, and those that take the next word.
+_ENV_FLAGS = {"-i", "--ignore-environment", "-0", "--null", "-v", "--debug"}
+_ENV_WITH_VALUE = {"-u", "--unset", "-C", "--chdir"}
+_ENV_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*", re.DOTALL)
+
+
 def exec_program(command):
     """The program a desktop entry's Exec line starts (after an env prefix
-    and its VAR=value words), or None."""
+    with its options and VAR=value words), or None, also for env forms it
+    does not know (-S, other options)."""
     try:
         parts = shlex.split(command)
     except ValueError:
         return None
     if parts and Path(parts[0]).name == "env":
         parts = parts[1:]
-        while parts and ("=" in parts[0] or parts[0] in ("-i", "--ignore-environment")):
-            parts = parts[1:]
+        while parts:
+            word = parts[0]
+            if word in _ENV_FLAGS or word.startswith(("--unset=", "--chdir=")) or _ENV_ASSIGNMENT.fullmatch(word):
+                parts = parts[1:]
+            elif word in _ENV_WITH_VALUE:
+                parts = parts[2:]
+            elif word == "--":
+                parts = parts[1:]
+                while parts and _ENV_ASSIGNMENT.fullmatch(parts[0]):
+                    parts = parts[1:]
+                break
+            elif word.startswith("-"):
+                return None
+            else:
+                break
     return parts[0] if parts else None
 
 
 def executable_exists(command):
-    """Check the program named by a desktop entry without running it."""
+    """Check the program named by a desktop entry without running it. An
+    env form exec_program does not know: env itself is checked."""
     program = exec_program(command)
     if not program:
-        return False
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return False
+        if not parts or Path(parts[0]).name != "env" or len(parts) < 2:
+            return False
+        program = parts[0]
     return os.access(program, os.X_OK) if "/" in program else shutil.which(program) is not None
 
 
@@ -686,7 +713,9 @@ _VERSION_WORD = re.compile(r"v?\d+(?:\.\d+)*(?:[.+~]?[a-z][\w.+~]*)?|v?\d+(?:\.\
 _RELEASE = re.compile(r"v?(\d+(?:\.\d+)*)(.*)", re.IGNORECASE | re.ASCII)
 _PRERELEASE = re.compile(r"[.~-]?(alpha|beta|preview|pre|rc|dev|nightly|a|b)\.?(\d*)", re.IGNORECASE | re.ASCII)
 # CPU names hold digits too (x86_64): never part of the name or the version.
-_CPU = re.compile(r"[-_ ]?(?:x86[-_]64|aarch64|arm64|amd64|armv7l|i[36]86)(?=$|[-_ .])", re.IGNORECASE)
+_CPU = re.compile(r"(?<![^-_ .])(?:x86[-_]64|aarch64|arm64|amd64|armv7l|i[36]86)(?=$|[-_ .])", re.IGNORECASE)
+# Prerelease stages, earliest first; a final release is above them all.
+_STAGES = {"dev": 0, "nightly": 0, "alpha": 1, "a": 1, "beta": 2, "b": 2, "pre": 3, "preview": 3, "rc": 4}
 
 
 def _is_version(word):
@@ -728,7 +757,7 @@ def _version_key(stem):
         word = word.split("+", 1)[0]
         tag = _PRERELEASE.fullmatch(word)
         if tag:
-            pre = pre or (int(tag.group(2) or 0),)
+            pre = pre or (_STAGES[tag.group(1).casefold()], int(tag.group(2) or 0))
             continue
         match = _RELEASE.fullmatch(word)
         if not match:
@@ -736,7 +765,7 @@ def _version_key(stem):
         release.extend(int(n) for n in match.group(1).split("."))
         tail = _PRERELEASE.fullmatch(match.group(2)) if match.group(2) else None
         if tail:
-            pre = pre or (int(tail.group(2) or 0),)
+            pre = pre or (_STAGES[tail.group(1).casefold()], int(tail.group(2) or 0))
     # Trailing zeros do not matter: 1.0 is 1.0.0.
     while release and release[-1] == 0:
         release.pop()
