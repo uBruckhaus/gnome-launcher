@@ -20,6 +20,7 @@ if [ -z "${GL_INNER:-}" ]; then
 fi
 gsettings set org.gnome.shell welcome-dialog-last-shown-version "$(gnome-shell --version | awk '{print $3}')"
 gsettings set org.gnome.desktop.interface color-scheme "${SCHEME:-default}"
+[ -n "${BUTTONS:-}" ] && gsettings set org.gnome.desktop.wm.preferences button-layout "$BUTTONS"
 gnome-shell --headless --wayland --no-x11 --virtual-monitor 1600x1000 \
     --wayland-display gl-test >"$T/shell.log" 2>&1 &
 SHELL_PID=$!
