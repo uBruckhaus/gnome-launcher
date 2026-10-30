@@ -11,6 +11,10 @@ one of the user's own custom shortcuts) removes that accelerator from it and
 remembers where it came from ("applied" in the state file); removing the
 launcher shortcut puts it back. Turning a binding off for an app works the
 same way. Nothing else in the user's settings is changed.
+
+On COSMIC the same logic writes to COSMIC's own shortcut file instead (see
+CosmicSettings): entries tagged "(Launcher)" are the launcher's, and every
+other entry is kept as it is.
 """
 
 import json
@@ -35,6 +39,14 @@ BINDING_SCHEMAS = ("org.gnome.desktop.wm.keybindings", "org.gnome.shell.keybindi
                    "org.gnome.mutter.keybindings", "org.gnome.mutter.wayland.keybindings", MEDIA_KEYS)
 FAVORITE_KEY = re.compile(r"^(?:switch-to|open-new-window)-application-(\d)$")
 
+# COSMIC: the config folder, and how its bindings look to the code above.
+COSMIC_SHORTCUTS = "cosmic/com.system76.CosmicSettings.Shortcuts/v1"
+COSMIC_DEFAULTS = Path("/usr/share") / COSMIC_SHORTCUTS / "defaults"
+COSMIC_TAKEN_FILE = Path.home() / ".config/gnome-launcher/cosmic-taken.json"
+COSMIC_SCHEMA = "cosmic.shortcuts"
+COSMIC_USER_PREFIX = "cosmic-"  # Paths of the user's own commands in COSMIC.
+COSMIC_OWN_TAG = " (Launcher)"  # Ends the description of the launcher's entries.
+
 # Modifier bits, as GDK has them.
 MOD_BITS = {"SHIFT": 1, "CTRL": 4, "ALT": 8, "SUPER": 64}
 MOD_ORDER = ("SUPER", "SHIFT", "CTRL", "ALT")
@@ -51,7 +63,8 @@ RETARGET = "retarget"
 _KEY_RE = re.compile(r"^[A-Za-z0-9_]{1,32}$")
 _ACCEL_RE = re.compile(r"^((?:<[A-Za-z0-9]{1,16}>){0,6})([A-Za-z0-9_]{1,32})$")
 _ACTION_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
-_WHERE_RE = re.compile(r"^(?:org\.gnome\.[a-z.-]{1,80}:[a-z0-9-]{1,80}|custom:" + re.escape(CUSTOM_BASE)
+_WHERE_RE = re.compile(r"^(?:(?:org\.gnome\.[a-z.-]{1,80}|cosmic\.shortcuts):[a-z0-9-]{1,80}|custom:"
+                       + re.escape(CUSTOM_BASE)
                        + r"[A-Za-z0-9_-]{1,64}/)$")
 
 
@@ -204,18 +217,320 @@ class GSettings:
         self.Gio.Settings.sync()
 
 
+# --- COSMIC's settings ---------------------------------------------------------
+
+def _ron_skip(text, index):
+    """The index after any whitespace and comments."""
+    while index < len(text):
+        if text[index].isspace():
+            index += 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end + 1
+        elif text.startswith("/*", index):
+            end = text.find("*/", index)
+            if end < 0:
+                raise ValueError("unterminated comment")
+            index = end + 2
+        else:
+            break
+    return index
+
+
+def _ron_find(text, index, stops):
+    """The index of the first stop character outside strings and brackets."""
+    depth = 0
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            index += 1
+            while index < len(text) and text[index] != char:
+                index += 2 if text[index] == "\\" else 1
+            if index >= len(text):
+                raise ValueError("unterminated string")
+        elif text.startswith(("//", "/*"), index):
+            index = _ron_skip(text, index)
+            continue
+        elif depth == 0 and char in stops:
+            return index
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        index += 1
+    raise ValueError("unterminated map")
+
+
+def _ron_quote(text):
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _ron_unquote(text):
+    return re.sub(r"\\(.)", r"\1", text)
+
+
+def _cosmic_entry(gap, raw):
+    """A map entry of a shortcut file, read: the text stays as it was."""
+    colon = _ron_find(raw, 0, ":")
+    binding, action = raw[:colon], raw[colon + 1:].strip()
+    mods = re.search(r"modifiers:\s*\[([^\]]*)\]", binding)
+    key = re.search(r'key:\s*"((?:[^"\\]|\\.)*)"', binding)
+    description = re.search(r'description:\s*Some\(\s*"((?:[^"\\]|\\.)*)"', binding)
+    combo = None
+    if mods and key:
+        names = {name.upper() for name in re.findall(r"[A-Za-z]+", mods.group(1))}
+        combo = make_combo(names, _ron_unquote(key.group(1)))
+    return {"gap": gap, "raw": raw, "combo": combo, "action": action,
+            "description": _ron_unquote(description.group(1)) if description else ""}
+
+
+def parse_cosmic_shortcuts(text):
+    """(text before the entries, entries, text after them) of a shortcut file.
+    Raises ValueError when it is not one: such a file is never rewritten."""
+    start = _ron_skip(text, 0)
+    if not text.startswith("{", start):
+        raise ValueError("not a map")
+    head_end = position = start + 1
+    entries = []
+    while True:
+        begin = _ron_skip(text, position)
+        if begin >= len(text):
+            raise ValueError("unterminated map")
+        if text[begin] == "}":
+            return text[:head_end], entries, text[position:]
+        end = _ron_find(text, _ron_find(text, begin, ":") + 1, ",}")
+        raw = text[begin:end].rstrip()
+        entries.append(_cosmic_entry(text[position:begin], raw))
+        position = begin + len(raw)
+        position = _ron_skip(text, position)
+        if text.startswith(",", position):
+            position += 1
+        else:
+            position = begin + len(raw)
+
+
+def _cosmic_slug(combo):
+    return "-".join([*(m.lower() for m in combo["mods"]), re.sub(r"_", "-", combo["key"].lower())])
+
+
+def _cosmic_action_label(action):
+    """"System(Terminal)" -> "Terminal", "Focus(Left)" -> "Focus Left"."""
+    action = re.sub(r"^System\((.*)\)$", r"\1", action)
+    words = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", re.sub(r"[()]", " ", action))
+    return " ".join(words.split())
+
+
+class CosmicSettings:
+    """COSMIC's shortcuts behind the same methods as GSettings: its defaults
+    plus the user's `custom` file, which overrides them.
+
+    A key is taken by a `Disable` entry (an entry of the user's own is kept
+    in the taken file and comes back with the key). The launcher's entries are
+    rewritten by sync(), in one atomic write: COSMIC reloads the file when it
+    changes. Tests pass their own paths."""
+
+    def __init__(self, config_dir=None, defaults_file=None, taken_file=None):
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        self.custom_file = Path(config_dir) / "custom" if config_dir else config_home / COSMIC_SHORTCUTS / "custom"
+        self.defaults_file = Path(defaults_file or COSMIC_DEFAULTS)
+        self.taken_file = Path(taken_file or COSMIC_TAKEN_FILE)
+        self.dirty = False
+        self._load()
+
+    def _load(self):
+        try:
+            text = self.custom_file.read_text()
+        except FileNotFoundError:
+            text = "{\n}\n"
+        self.head, self.entries, self.tail = parse_cosmic_shortcuts(text)
+        self.original = text
+        try:
+            taken = json.loads(self.taken_file.read_text())
+        except (OSError, ValueError):
+            taken = {}
+        taken = taken if isinstance(taken, dict) else {}
+        # taken: entries given up on request; shadowed: entries an own shortcut replaced.
+        self.taken = {str(k): str(v) for k, v in (taken.get("taken") or {}).items()}
+        self.shadowed = {str(k): str(v) for k, v in (taken.get("shadowed") or {}).items()}
+        self.own = {}
+        for entry in self.entries:
+            if self._is_own(entry):
+                self.own[f"{CUSTOM_BASE}{OWN_PREFIX}{len(self.own)}/"] = {
+                    "name": entry["description"].removesuffix(COSMIC_OWN_TAG),
+                    "command": self._spawned(entry) or "",
+                    "binding": accelerator(entry["combo"])}
+
+    def _refresh(self):
+        if not self.dirty:
+            self._load()
+
+    @staticmethod
+    def _is_own(entry):
+        return bool(entry["combo"]) and entry["description"].endswith(COSMIC_OWN_TAG)
+
+    @staticmethod
+    def _spawned(entry):
+        match = re.search(r'^Spawn\(\s*"((?:[^"\\]|\\.)*)"', entry["action"])
+        return _ron_unquote(match.group(1)) if match else None
+
+    def _find(self, slug):
+        return next((e for e in self.entries
+                     if e["combo"] and _cosmic_slug(e["combo"]) == slug and not self._is_own(e)), None)
+
+    def _remove(self, entry):
+        index = self.entries.index(entry)
+        del self.entries[index]
+        if entry["gap"].strip():  # A comment stays where it was.
+            if index < len(self.entries):
+                self.entries[index]["gap"] = entry["gap"] + self.entries[index]["gap"]
+            else:
+                self.tail = entry["gap"] + self.tail
+
+    def _add(self, raw):
+        self.entries.append(_cosmic_entry("\n    ", raw))
+
+    @staticmethod
+    def _binding_text(combo, description=""):
+        names = ", ".join(MOD_LABELS[m] for m in combo["mods"])
+        key = combo["key"].lower() if len(combo["key"]) == 1 else combo["key"]
+        extra = f", description: Some({_ron_quote(description)})" if description else ""
+        return f"(modifiers: [{names}], key: {_ron_quote(key)}{extra})"
+
+    def _effective(self):
+        """{slug: (combo, action)}: what COSMIC's defaults and the user's file
+        bind right now, without commands and the launcher's own keys."""
+        _head, defaults, _tail = parse_cosmic_shortcuts(self.defaults_file.read_text())
+        found = {_cosmic_slug(e["combo"]): (e["combo"], e["action"]) for e in defaults if e["combo"]}
+        for entry in self.entries:
+            if entry["combo"]:
+                slug = _cosmic_slug(entry["combo"])
+                if self._is_own(entry) or entry["action"] == "Disable" or self._spawned(entry) is not None:
+                    found.pop(slug, None)
+                else:
+                    found[slug] = (entry["combo"], entry["action"])
+        return found
+
+    def available(self):
+        return self.defaults_file.is_file()
+
+    def binding_keys(self):
+        self._refresh()
+        return [(COSMIC_SCHEMA, slug, _cosmic_action_label(action), [accelerator(combo)])
+                for slug, (combo, action) in self._effective().items()]
+
+    def get_strv(self, _schema_id, key):
+        found = self._effective().get(key)
+        return [accelerator(found[0])] if found else []
+
+    def set_strv(self, _schema_id, key, values):
+        self.dirty = True
+        entry = self._find(key)
+        if values:
+            if entry and entry["action"] == "Disable":
+                self._remove(entry)
+            raw = self.taken.pop(key, "")
+            if raw:
+                self._add(raw)
+            return
+        combo = entry["combo"] if entry else self._effective()[key][0]
+        if entry:
+            self.taken[key] = entry["raw"]
+            self._remove(entry)
+        else:
+            self.taken[key] = ""
+        self._add(f"{self._binding_text(combo)}: Disable")
+
+    def _user_path(self, slug):
+        return f"{CUSTOM_BASE}{COSMIC_USER_PREFIX}{slug}/"
+
+    def custom_paths(self):
+        self._refresh()
+        paths = list(self.own)
+        for entry in self.entries:
+            if entry["combo"] and not self._is_own(entry) and self._spawned(entry) is not None:
+                paths.append(self._user_path(_cosmic_slug(entry["combo"])))
+        for slug, raw in self.taken.items():
+            if raw and self._spawned(_cosmic_entry("", raw)) is not None:
+                paths.append(self._user_path(slug))
+        return paths
+
+    def set_custom_paths(self, paths):
+        self.dirty = True
+        self.own = {path: values for path, values in self.own.items() if path in paths}
+
+    def read_custom(self, path):
+        if path in self.own:
+            return dict(self.own[path])
+        slug = path[len(CUSTOM_BASE) + len(COSMIC_USER_PREFIX):-1]
+        entry = self._find(slug)
+        taken = entry is None or self._spawned(entry) is None
+        if taken:
+            entry = _cosmic_entry("", self.taken.get(slug) or "(modifiers: []): Disable")
+        return {"name": entry["description"], "command": self._spawned(entry) or "",
+                "binding": "" if taken else accelerator(entry["combo"])}
+
+    def write_custom(self, path, values):
+        self.dirty = True
+        if path.startswith(CUSTOM_BASE + OWN_PREFIX):
+            self.own.setdefault(path, {}).update(values)
+        else:
+            binding = values.get("binding")
+            self.set_strv(COSMIC_SCHEMA, path[len(CUSTOM_BASE) + len(COSMIC_USER_PREFIX):-1],
+                          [binding] if binding else [])
+
+    def reset_custom(self, path):
+        self.dirty = True
+        self.own.pop(path, None)
+
+    def sync(self):
+        for entry in [e for e in self.entries if self._is_own(e)]:
+            self._remove(entry)
+        wanted = {}
+        for values in self.own.values():
+            combo = parse_accelerator(values.get("binding"))
+            if combo:
+                wanted[_cosmic_slug(combo)] = (combo, values)
+        for slug, (combo, values) in wanted.items():
+            # The launcher's entry replaces any other on the key (one entry per key).
+            entry = self._find(slug)
+            if entry:
+                if slug not in self.taken:
+                    self.shadowed[slug] = entry["raw"]
+                self._remove(entry)
+            self._add(f"{self._binding_text(combo, values.get('name', '') + COSMIC_OWN_TAG)}: "
+                      f"Spawn({_ron_quote(values.get('command', ''))})")
+        for slug in [s for s in self.shadowed if s not in wanted]:
+            self._add(self.shadowed.pop(slug))
+        text = self.head + "".join(f"{e['gap']}{e['raw']}," for e in self.entries) + self.tail
+        parse_cosmic_shortcuts(text)  # Never hand COSMIC a file that cannot be read back.
+        _atomic_write(self.taken_file, json.dumps({"taken": self.taken, "shadowed": self.shadowed}, indent=2) + "\n")
+        if text != self.original:
+            _atomic_write(self.custom_file, text)
+        self.dirty = False
+        self._load()
+
+
+def on_cosmic():
+    return "COSMIC" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")
+
+
+def desktop_name():
+    """The desktop whose keys the key map shows."""
+    return "COSMIC" if on_cosmic() else "GNOME"
+
+
 _backend = None
 
 
 def backend():
     global _backend
     if _backend is None:
-        _backend = GSettings()
+        _backend = CosmicSettings() if on_cosmic() else GSettings()
     return _backend
 
 
 def available():
-    """Whether GNOME's custom keybindings are there to write to."""
+    """Whether the desktop's custom keybindings are there to write to."""
     try:
         return backend().available()
     except Exception:
@@ -587,11 +902,11 @@ def _give_back(settings, where, accel):
 
 def save_and_apply(state, settings=None, path=None):
     """Write the launcher's custom keybindings, take or give back the keys
-    of other bindings, and save state. Raises RuntimeError when GNOME's
-    keybinding settings are not there."""
+    of other bindings, and save state. Raises RuntimeError when the
+    desktop's keybinding settings are not there."""
     settings = settings or backend()
     if not settings.available():
-        raise RuntimeError("GNOME's custom keybinding settings are not installed")
+        raise RuntimeError(f"{desktop_name()}'s custom keybinding settings are not installed")
     path = Path(path or STATE_FILE)
     previous = {(a["where"], a["accel"]) for a in load_state(path).get("applied", [])}
     wanted = _desired_removals(state)

@@ -38,6 +38,12 @@ then **its own menu › Shortcut…**.
   open the app or one of its own actions (a private window, a new terminal).
   GNOME's Super + 1…9 for apps pinned to the Dash are shown as the app's
   shortcuts too.
+- **Global shortcuts on COSMIC too.** On COSMIC a shortcut is an entry in
+  COSMIC's own shortcut file (you also see it in Settings › Input Devices ›
+  Keyboard › Keyboard Shortcuts, tagged "(Launcher)"). The key map shows
+  COSMIC's bindings, and your other entries are never changed. Taking a key
+  turns the binding off while your shortcut exists; removing your shortcut
+  gives it back.
 - **Pin to Dash / Unpin from Dash** in every app's menu; pinned apps carry a
   small pin, and pins made elsewhere show up at once.
 - **Updates:** apps whose package has a newer version (`checkupdates`, and
@@ -79,6 +85,7 @@ go back or close.
 | Your custom icons | `~/.local/share/gnome-launcher/icons/` |
 | Icon search index, AppImage icons | `~/.cache/gnome-launcher/` |
 | The shortcuts themselves | GNOME's custom keybindings (`…/custom-keybindings/gnome-launcher-N/`) |
+| The shortcuts on COSMIC | `~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom`; keys taken from other bindings in `~/.config/gnome-launcher/cosmic-taken.json` |
 | The top bar icon | `~/.local/share/gnome-shell/extensions/launcher-button@ubruckhaus.github.io` (a link), on or off in GNOME's extension list |
 
 ## Network

@@ -3294,7 +3294,7 @@ class Launcher(Adw.Application):
         suggest_title = section(_("Free keys"))
         legend = Gtk.Box(spacing=10)
         for text, css in (("● " + _("free"), "sc-legend-free"), ("● " + _("yours"), "sc-legend-yours"),
-                          ("● " + _("GNOME default"), "sc-legend-desktop")):
+                          ("● " + _("{0} default").format(shortcuts.desktop_name()), "sc-legend-desktop")):
             item = Gtk.Label(label=text)
             item.add_css_class("sc-legend")
             item.add_css_class(css)
@@ -4427,7 +4427,7 @@ class Launcher(Adw.Application):
             self.sc_current.append(empty)
         for combo in entry["disabled"]:
             was = " · " + _("was “{0}”").format(combo['description']) if combo.get("description") else ""
-            item(combo, combo.get("source") or "GNOME", _("Turned off") + was, _("Turn on"),
+            item(combo, combo.get("source") or shortcuts.desktop_name(), _("Turned off") + was, _("Turn on"),
                  _("Use this shortcut again"), lambda c=combo: self.restore_external_shortcut(c),
                  dim=True)
         count = f" ({active})" if active > 1 else ""
@@ -4541,7 +4541,7 @@ class Launcher(Adw.Application):
         elif level in (shortcuts.SAME, shortcuts.RETARGET):
             tip = _("{0} — already opens {1}").format(label, self.shortcut_app['name'])
         elif level == shortcuts.DESKTOP:
-            tip = _("{0} — GNOME's “{1}”; click to rebind").format(label, owner)
+            tip = _("{0} — {2}'s “{1}”; click to rebind").format(label, owner, shortcuts.desktop_name())
         elif level == shortcuts.LAUNCHER:
             tip = _("{0} — opens {1}; click to move it here").format(label, owner)
         else:
@@ -4674,8 +4674,9 @@ class Launcher(Adw.Application):
                                        "exists; removing the shortcut brings it back.").format(owner),
                                      "sc-warn", N_("Rebind"), "sc-warn-btn", True)
         else:
-            self.set_shortcut_status(_("GNOME's “{0}”. Assigning turns it off while this shortcut "
-                                       "exists; removing the shortcut brings it back.").format(owner),
+            self.set_shortcut_status(_("{1}'s “{0}”. Assigning turns it off while this shortcut "
+                                       "exists; removing the shortcut brings it back.").format(
+                                           owner, shortcuts.desktop_name()),
                                      "sc-hint-desktop", N_("Rebind"), "sc-desktop-btn", True)
 
     def on_shortcut_key(self, controller, keyval, keycode, state):
